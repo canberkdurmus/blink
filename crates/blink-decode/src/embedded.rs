@@ -55,7 +55,11 @@ impl EmbeddedImage {
 
 /// Every embedded image in `file`, sorted by offset.
 pub fn find(file: &[u8]) -> Vec<EmbeddedImage> {
-    let mut out = find_jpegs(file);
+    let raw_data = raw_data_offsets(file);
+    let mut out: Vec<_> = find_jpegs(file)
+        .into_iter()
+        .filter(|e| !raw_data.contains(&e.offset))
+        .collect();
     out.extend(find_tiff_rgb(file));
     out.sort_by_key(|e| e.offset);
     out.dedup_by_key(|e| e.offset);
@@ -183,6 +187,9 @@ fn find_tiff_rgb(file: &[u8]) -> Vec<EmbeddedImage> {
         let (Some(w), Some(h)) = (u(0x100), u(0x101)) else {
             return;
         };
+        let (Ok(w), Ok(h)) = (u32::try_from(w), u32::try_from(h)) else {
+            return;
+        };
         let offs = ifd
             .get(0x111)
             .map(|e| t.uints(e, 1 << 16))
@@ -201,9 +208,17 @@ fn find_tiff_rgb(file: &[u8]) -> Vec<EmbeddedImage> {
             if *o as usize != end {
                 return;
             }
-            end += *c as usize;
+            let Some(e) = end.checked_add(*c as usize) else {
+                return;
+            };
+            end = e;
         }
-        let need = (w * h * 3) as usize;
+        let Some(need) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(3))
+        else {
+            return;
+        };
         if end - start < need || end > file.len() || w == 0 || h == 0 {
             return;
         }
@@ -211,10 +226,33 @@ fn find_tiff_rgb(file: &[u8]) -> Vec<EmbeddedImage> {
             kind: EmbeddedKind::Rgb8,
             offset: start,
             len: need,
-            width: w as u32,
-            height: h as u32,
+            width: w,
+            height: h,
         });
     });
+    out
+}
+
+/// Strip/tile offsets of full-resolution raw image IFDs (NewSubfileType bit 0 clear, CFA or
+/// LinearRaw). Lossy DNGs store the sensor image as baseline-JPEG tiles; those are raw data, not
+/// previews.
+fn raw_data_offsets(file: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(t) = Tiff::parse(file, 0) else {
+        return out;
+    };
+    walk_image_ifds(&t, |ifd| {
+        let u = |tag| ifd.get(tag).and_then(|e| t.uint(e));
+        if u(0xFE).unwrap_or(0) & 1 != 0 || !matches!(u(0x106), Some(32803 | 34892)) {
+            return;
+        }
+        for tag in [0x111, 0x144] {
+            if let Some(e) = ifd.get(tag) {
+                out.extend(t.uints(e, 1 << 20).into_iter().map(|o| o as usize));
+            }
+        }
+    });
+    out.sort_unstable();
     out
 }
 
@@ -282,6 +320,60 @@ mod tests {
         assert_eq!(found[0].len, fake_jpeg(160, 120, 0xC0).len());
         assert_eq!((found[1].offset, found[1].width), (b, 1616));
         assert_eq!(largest(&found).unwrap().width, 1616);
+    }
+
+    #[test]
+    fn huge_or_negative_rgb_preview_dimensions_do_not_panic() {
+        use crate::tiff::build::*;
+        for (w, h) in [(u32::MAX, u32::MAX), (0xFFFF_FFFF, 3), (1 << 31, 1 << 31)] {
+            let b = tiff_le(&[
+                (0x100, 4, 1, w.to_le_bytes().to_vec()),
+                (0x101, 4, 1, h.to_le_bytes().to_vec()),
+                short(0x103, 1),
+                short(0x106, 2),
+                short(0x115, 3),
+                (
+                    0x102,
+                    3,
+                    3,
+                    [8u16, 8, 8].iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ),
+                (0x111, 4, 1, 8u32.to_le_bytes().to_vec()),
+                (0x117, 4, 1, u32::MAX.to_le_bytes().to_vec()),
+            ]);
+            assert!(find(&b).is_empty());
+        }
+        // Negative SLONG width.
+        let b = tiff_le(&[
+            (0x100, 9, 1, (-5i32).to_le_bytes().to_vec()),
+            short(0x101, 4),
+        ]);
+        assert!(find(&b).is_empty());
+    }
+
+    #[test]
+    fn lossy_dng_raw_tiles_are_not_previews() {
+        use crate::tiff::build::*;
+        let tile = fake_jpeg(256, 256, 0xC0);
+        let thumb = fake_jpeg(160, 120, 0xC0);
+        // IFD0: raw (LinearRaw, NewSubfileType 0) with one tile at a known offset.
+        let header_guess = tiff_le(&[
+            (0xFE, 4, 1, 0u32.to_le_bytes().to_vec()),
+            short(0x106, 34892),
+            (0x144, 4, 1, 0u32.to_le_bytes().to_vec()),
+        ]);
+        let tile_at = header_guess.len() as u32;
+        let mut b = tiff_le(&[
+            (0xFE, 4, 1, 0u32.to_le_bytes().to_vec()),
+            short(0x106, 34892),
+            (0x144, 4, 1, tile_at.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(b.len(), header_guess.len());
+        b.extend(&tile);
+        b.extend(&thumb);
+        let found = find(&b);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].width, 160);
     }
 
     #[test]

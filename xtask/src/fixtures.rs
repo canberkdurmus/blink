@@ -16,6 +16,15 @@ pub fn run() -> Result {
         })
         .collect();
     files.push(("adobe-rgb.jpg".into(), fixtures::adobe_rgb_jpeg()));
+    use blink_testkit::sidecars;
+    for (name, x) in [
+        ("sidecar-lightroom.xmp", sidecars::lightroom(4, Some("Red"))),
+        ("sidecar-darktable.xmp", sidecars::darktable(-1)),
+        ("sidecar-bridge.xmp", sidecars::bridge(5, Some("Green"))),
+        ("sidecar-digikam.xmp", sidecars::digikam(3, Some("Purple"))),
+    ] {
+        files.push((name.into(), x.into_bytes()));
+    }
     for (name, bytes) in &files {
         std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
     }
