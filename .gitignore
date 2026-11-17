@@ -1,2 +1,6 @@
 target/
 .autopilot/
+# corpus cache (fetched by `cargo xtask corpus fetch`)
+corpus/cache/
+# generated synthetic fixtures
+corpus/synthetic/
