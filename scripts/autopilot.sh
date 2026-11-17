@@ -39,7 +39,9 @@ for ((i = 1; i <= MAX_SESSIONS; i++)); do
   reports_before=$(ls docs/reports 2>/dev/null | wc -l)
   ts=$(date -u +%Y%m%dT%H%M%SZ)
   start=$(date +%s)
+  # --settings outranks project settings: commits and PRs never credit Claude.
   claude -p "/goal ${GOAL}" --permission-mode auto --strict-mcp-config \
+    --settings '{"attribution":{"commit":"","pr":""},"includeCoAuthoredBy":false}' \
     --output-format stream-json --verbose \
     < /dev/null > ".autopilot/logs/${ts}.jsonl" 2>&1
   code=$?
