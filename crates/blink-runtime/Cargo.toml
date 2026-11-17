@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 blink-core.workspace = true
+directories = "=6.0.0"
