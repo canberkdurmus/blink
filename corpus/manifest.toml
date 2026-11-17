@@ -4,16 +4,309 @@
 # Every entry records its license; only redistributable files (prefer CC0) are allowed.
 # Expected values are frozen: changing them requires a `golden-update:` commit trailer.
 #
-# Entry format:
-# [[file]]
-# path = "sony/ILCE-1.ARW"
-# sha256 = "…"
-# url = "https://raw.pixls.us/…"
-# license = "CC0-1.0"
-# camera = "Sony ILCE-1"
-# [file.expected]
-# preview_w = 0
-# preview_h = 0
-# badge = "EMBEDDED"
-# sensor_w = 0
-# sensor_h = 0
+#
+# Bootstrap (2026-11-17): exif.* from `exiftool -j -n` 13.25 (EXIF tags only: LensModel 0xA434,
+# no makernote/composite values; absent tags are omitted). preview_w/h = largest embedded image
+# (exiftool -b extraction; Leica M8 = uncompressed 320x240 IFD0 image). sensor_w/h = rawler 0.8.0
+# recommended crop (= ExifImageWidth/RawImageCroppedSize); Nikon Z6_3 (HE, rawler can't decode):
+# raw IFD size. badge per SPEC §3 (LOW-RES when preview long edge < 50% of sensor long edge).
+# See docs/adr/0006-corpus.md.
+
+[[file]]
+path = "sony/NEX-5N.ARW"
+sha256 = "5074d2a29755fac544cb6cb435153569613f849f1c1dd777cacd6455be046788"
+url = "https://raw.pixls.us/getfile.php/1860/nice/Sony%20-%20NEX-5N%20-%2012bit%2012bit%20compressed%20%283%3A2%29.ARW"
+license = "CC0-1.0"
+camera = "Sony NEX-5N"
+mode = "12bit 12bit compressed (3:2)"
+[file.expected]
+preview_w = 1616
+preview_h = 1080
+badge = "EMBEDDED · LOW-RES"
+sensor_w = 4912
+sensor_h = 3264
+[file.expected.exif]
+make = "SONY"
+model = "NEX-5N"
+lens = "E 18-55mm F3.5-5.6 OSS"
+focal_length = 18
+exposure_time = 0.005
+f_number = 7.1
+iso = 100
+exposure_compensation = 0
+date_time_original = "2012:07:15 16:30:58"
+orientation = 1
+
+[[file]]
+path = "sony/ILCE-1M2.ARW"
+sha256 = "bfe5113d3a6bc237ed0852a23d99da1c9733eb3f63056e362f40450fdd9644f8"
+url = "https://raw.pixls.us/getfile.php/7831/nice/Sony%20-%20ILCE-1M2%20-%2014bit%20Lossy%20%283%3A2%29.ARW"
+license = "CC0-1.0"
+camera = "Sony ILCE-1M2"
+mode = "14bit Lossy (3:2)"
+[file.expected]
+preview_w = 8640
+preview_h = 5760
+badge = "EMBEDDED"
+sensor_w = 8640
+sensor_h = 5760
+[file.expected.exif]
+make = "SONY"
+model = "ILCE-1M2"
+lens = "FE 70-200mm F2.8 GM OSS II"
+focal_length = 133
+exposure_time = 0.001
+f_number = 2.8
+iso = 100
+exposure_compensation = 0
+date_time_original = "2025:05:09 09:35:49"
+offset_time_original = "+01:00"
+orientation = 1
+
+[[file]]
+path = "canon/EOS-20D.CR2"
+sha256 = "db78660d48589130d99e0bc621424851eb0f84df052634fb5bc89c7a02fe7033"
+url = "https://raw.pixls.us/getfile.php/1018/nice/Canon%20-%20EOS%2020D%20-%20RAW%20%283%3A2%29.CR2"
+license = "CC0-1.0"
+camera = "Canon EOS 20D"
+mode = "RAW (3:2)"
+[file.expected]
+preview_w = 1536
+preview_h = 1024
+badge = "EMBEDDED · LOW-RES"
+sensor_w = 3504
+sensor_h = 2336
+[file.expected.exif]
+make = "Canon"
+model = "Canon EOS 20D"
+focal_length = 75
+exposure_time = 0.008
+f_number = 2.8
+iso = 800
+exposure_compensation = 0
+date_time_original = "2017:01:31 02:14:26"
+orientation = 1
+
+[[file]]
+path = "canon/EOS-R6.CR3"
+sha256 = "74abb0a113d075ad9887a058082f40dd2a938c4813a08474d82356f11a027778"
+url = "https://raw.pixls.us/getfile.php/4659/nice/Canon%20-%20EOS%20R6%20-%203%3A2.CR3"
+license = "CC0-1.0"
+camera = "Canon EOS R6"
+mode = "3:2"
+[file.expected]
+preview_w = 3408
+preview_h = 2272
+badge = "EMBEDDED"
+sensor_w = 3408
+sensor_h = 2272
+[file.expected.exif]
+make = "Canon"
+model = "Canon EOS R6"
+lens = "RF70-200mm F2.8 L IS USM"
+focal_length = 200
+exposure_time = 0.25
+f_number = 25
+iso = 100
+exposure_compensation = 0
+date_time_original = "2021:05:12 12:21:21"
+offset_time_original = "+02:00"
+orientation = 1
+
+[[file]]
+path = "nikon/Z6_3.NEF"
+sha256 = "a8fa2cacadcf9dc85475ebcf37fcc32614072bc155e39d01491cb9e293c1343d"
+url = "https://raw.pixls.us/getfile.php/7810/nice/Nikon%20-%20Z6_3%20-%208bit%20compressed%20%283%3A2%29.NEF"
+license = "CC0-1.0"
+camera = "Nikon Z6_3"
+mode = "8bit compressed (3:2)"
+[file.expected]
+preview_w = 3984
+preview_h = 2656
+badge = "EMBEDDED"
+sensor_w = 4000
+sensor_h = 2672
+[file.expected.exif]
+make = "NIKON CORPORATION"
+model = "NIKON Z6_3"
+lens = "NIKKOR Z 24-200mm f/4-6.3 VR"
+focal_length = 86
+exposure_time = 0.01666666667
+f_number = 8
+iso = 200
+exposure_compensation = 0
+date_time_original = "2024:06:29 15:38:47"
+offset_time_original = "-04:00"
+orientation = 1
+
+[[file]]
+path = "fujifilm/X-S10.RAF"
+sha256 = "519e1ac6cedd0424c17896c4e5ba40810796927baf536055d39623996894c16f"
+url = "https://raw.pixls.us/getfile.php/4189/nice/Fujifilm%20-%20X-S10%20-%2014bit%2014bit%20compressed%20%283%3A2%29.RAF"
+license = "CC0-1.0"
+camera = "Fujifilm X-S10"
+mode = "14bit 14bit compressed (3:2)"
+[file.expected]
+preview_w = 4416
+preview_h = 2944
+badge = "EMBEDDED"
+sensor_w = 6240
+sensor_h = 4160
+[file.expected.exif]
+make = "FUJIFILM"
+model = "X-S10"
+lens = "XF16-80mmF4 R OIS WR"
+focal_length = 69.8
+exposure_time = 0.3571428571
+f_number = 4
+iso = 160
+exposure_compensation = 0
+date_time_original = "2020:11:28 18:42:23"
+orientation = 1
+
+[[file]]
+path = "olympus/E-M10.ORF"
+sha256 = "d7f6ac99ee1f824e81ec0e71599f0f87f9b2e2675f7ddfdb21202281b8bdc5e0"
+url = "https://raw.pixls.us/getfile.php/1331/nice/Olympus%20-%20E-M10%20-%2016bit%20%284%3A3%29.ORF"
+license = "CC0-1.0"
+camera = "Olympus E-M10"
+mode = "16bit (4:3)"
+[file.expected]
+preview_w = 3200
+preview_h = 2400
+badge = "EMBEDDED"
+sensor_w = 4608
+sensor_h = 3456
+[file.expected.exif]
+make = "OLYMPUS IMAGING CORP."
+model = "E-M10"
+lens = "OLYMPUS M.40-150mm F4.0-5.6 R"
+focal_length = 58
+exposure_time = 0.0005
+f_number = 4.4
+iso = 200
+exposure_compensation = 0
+date_time_original = "2017:03:18 15:54:01"
+orientation = 1
+
+[[file]]
+path = "panasonic/DMC-LX7.RW2"
+sha256 = "07c96244a3cd36b7301a6b428cbe377ab0362d91973fe56dee006d809c39f573"
+url = "https://raw.pixls.us/getfile.php/1772/nice/Panasonic%20-%20DMC-LX7%20-%203%3A2.RW2"
+license = "CC0-1.0"
+camera = "Panasonic DMC-LX7"
+mode = "3:2"
+[file.expected]
+preview_w = 1920
+preview_h = 1280
+badge = "EMBEDDED"
+sensor_w = 3776
+sensor_h = 2520
+[file.expected.exif]
+make = "Panasonic"
+model = "DMC-LX7"
+focal_length = 4.7
+exposure_time = 0.000625
+f_number = 2.8
+iso = 100
+exposure_compensation = 0
+date_time_original = "2017:10:03 14:22:27"
+orientation = 1
+
+[[file]]
+path = "pentax/K10D.PEF"
+sha256 = "e35ae4154a468be3154f5f462e884ba5941f010d3e8f23d347fbec14809f44d3"
+url = "https://raw.pixls.us/getfile.php/2239/nice/Pentax%20-%20K10D%20-%2012bit%2012bit%20compressed%20%283%3A2%29.PEF"
+license = "CC0-1.0"
+camera = "Pentax K10D"
+mode = "12bit 12bit compressed (3:2)"
+[file.expected]
+preview_w = 3872
+preview_h = 2592
+badge = "EMBEDDED"
+sensor_w = 3872
+sensor_h = 2592
+[file.expected.exif]
+make = "PENTAX Corporation"
+model = "PENTAX K10D"
+focal_length = 70
+exposure_time = 0.004
+f_number = 5
+iso = 100
+exposure_compensation = 0
+date_time_original = "2014:08:13 13:01:27"
+orientation = 1
+
+[[file]]
+path = "leica/M8.DNG"
+sha256 = "7fdcca2371bb07fbf9483fcb08e3b5ab093eca1ca3924cbc86d6863736c31153"
+url = "https://raw.pixls.us/getfile.php/2988/nice/Leica%20-%20M8%20-%208bit%208bit%20uncompressed%20%283%3A2%29.DNG"
+license = "CC0-1.0"
+camera = "Leica M8"
+mode = "8bit 8bit uncompressed (3:2)"
+[file.expected]
+preview_w = 320
+preview_h = 240
+badge = "EMBEDDED · LOW-RES"
+sensor_w = 3916
+sensor_h = 2634
+[file.expected.exif]
+make = "Leica Camera AG"
+model = "M8 Digital Camera"
+focal_length = 35
+exposure_time = 0.004
+iso = 160
+exposure_compensation = 0
+date_time_original = "2018:07:08 10:30:28"
+orientation = 1
+
+[[file]]
+path = "apple/iPhone-6s-Plus.DNG"
+sha256 = "845fee4f09c832af3728778737f5ae9b99124debb821b6e2066b94aed1daa91c"
+url = "https://raw.pixls.us/getfile.php/915/nice/Apple%20-%20iPhone%206s%20Plus%20-%2016bit%20%284%3A3%29.DNG"
+license = "CC0-1.0"
+camera = "Apple iPhone 6s Plus"
+mode = "16bit (4:3)"
+[file.expected]
+preview_w = 852
+preview_h = 640
+badge = "EMBEDDED · LOW-RES"
+sensor_w = 4032
+sensor_h = 3024
+[file.expected.exif]
+make = "Apple"
+model = "iPhone 6s Plus"
+lens = "iPhone 6s Plus back camera 4.15mm f/2.2"
+focal_length = 4.15
+exposure_time = 0.0001819836215
+f_number = 2.2
+iso = 25
+exposure_compensation = 0
+date_time_original = "2016:12:19 15:10:15"
+orientation = 1
+
+[[file]]
+path = "nikon/Z-6.NEF"
+sha256 = "f0ab08da469ee205f2bc08efd9005778c64cdcb064893cee03768e32e5da1a36"
+url = "https://raw.pixls.us/getfile.php/3587/nice/Nikon%20-%20Z%206%20-%2012bit%2012bit%20compressed%20%283%3A2%29.NEF"
+license = "CC0-1.0"
+camera = "Nikon Z 6"
+mode = "12bit 12bit compressed (3:2)"
+[file.expected]
+preview_w = 3024
+preview_h = 2016
+badge = "EMBEDDED"
+sensor_w = 4528
+sensor_h = 3018
+[file.expected.exif]
+make = "NIKON CORPORATION"
+model = "NIKON Z 6"
+lens = "NIKKOR Z 24-70mm f/4 S"
+focal_length = 52
+exposure_time = 1
+f_number = 6.7
+iso = 100
+exposure_compensation = 0
+date_time_original = "2019:11:29 17:15:20"
+offset_time_original = "+01:00"
+orientation = 1
