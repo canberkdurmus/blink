@@ -14,9 +14,9 @@ M0 bootstrap: finish the workflows, `.claude/` setup, a green 6-target CI and th
 - [x] Workspace and crate stubs, empty egui window
 - [x] xtask: verify, trace, corpus fetch, bench, report, guard
 - [x] PROGRESS.md, BLOCKED.md, HUMAN_TODO.md, ADR 0001, docs/ideas.md
-- [ ] Workflows: ci.yml (6 targets), nightly.yml, weekly.yml, release.yml
-- [ ] `.claude/` settings, hooks, agents, skill
-- [ ] CI green on all 6 targets
+- [x] Workflows: ci.yml (6 targets), nightly.yml, weekly.yml, release.yml
+- [x] `.claude/` settings, hooks, agents, skill
+- [x] CI green on all 6 targets (run 44182943822)
 - [ ] `v0.0.1-m0` pre-release built on all targets
 - [ ] Gate report docs/reports/M0.md
 
