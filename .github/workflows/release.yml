@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  create:
+    name: Create GitHub release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "release exists"; exit 0; fi
+          pre=""; case "$TAG" in *-*) pre="--prerelease";; esac
+          gh release create "$TAG" $pre --verify-tag --title "Blink $TAG" \
+            --notes "Automated build of $TAG. Gate report: docs/reports/ in the repository. Binaries are unsigned."
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm }
+          - { name: macos-arm64, os: macos-15 }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: windows-x86_64, os: windows-2025 }
+          - { name: windows-arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: ./.github/actions/setup
+        with:
+          nextest: "false"
+          cache-key: release
+      - run: cargo build --release --locked -p blink -p blink-cli
+      - name: Package
+        shell: bash
+        run: |
+          name="blink-${TAG}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          cp LICENSE "dist/$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/blink.exe target/release/blink-cli.exe "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+            echo "ASSET=dist/$name.zip" >> "$GITHUB_ENV"
+          else
+            cp target/release/blink target/release/blink-cli "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - name: Smoke test CLI
+        shell: bash
+        run: ./target/release/blink-cli --version
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" --clobber

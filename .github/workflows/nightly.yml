@@ -1,0 +1,96 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  NEXTEST_PROFILE: ci
+
+jobs:
+  full-and-perf:
+    name: Full suite + perf ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm }
+          - { name: macos-arm64, os: macos-15 }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: windows-x86_64, os: windows-2025 }
+          - { name: windows-arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Corpus cache
+        uses: actions/cache@v6
+        with:
+          path: corpus/cache
+          key: corpus-${{ hashFiles('corpus/manifest.toml') }}
+      - run: cargo xtask corpus fetch
+      - run: cargo xtask verify --full
+      - run: cargo xtask bench
+
+  soak:
+    name: Soak (10 min random actions)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Soak
+        run: |
+          if cargo xtask help 2>&1 | grep -q soak; then cargo xtask soak --minutes 10;
+          else echo "soak harness arrives with the replay harness (M2+); nothing to run yet"; fi
+
+  fuzz:
+    name: Fuzz (20 min per target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fuzz targets
+        run: |
+          if [ ! -d fuzz ]; then echo "no fuzz targets yet (XMP parser arrives in M1/M3)"; exit 0; fi
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+          for t in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$t" -- -max_total_time=1200
+          done
+
+  interop:
+    name: darktable / digiKam interop
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Interop
+        run: |
+          if [ ! -d tests/interop ]; then echo "interop tests arrive with sidecar writing (M3)"; exit 0; fi
+          sudo apt-get update -q && sudo apt-get install -yq darktable digikam
+          cargo xtask interop
+
+  report-failure:
+    name: Open/update nightly-failure issue
+    needs: [full-and-perf, soak, fuzz, interop]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          num=$(gh issue list --label nightly-failure --state open --limit 1 --json number --jq '.[0].number')
+          body="Nightly failed on $(date -u +%F): $RUN_URL"
+          if [ -n "$num" ]; then gh issue comment "$num" --body "$body";
+          else gh issue create --title "Nightly failure" --label nightly-failure --body "$body"; fi

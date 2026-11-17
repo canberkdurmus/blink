@@ -1,0 +1,73 @@
+name: Weekly
+
+on:
+  schedule:
+    - cron: "41 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  mutants:
+    name: cargo-mutants (core, xmp)
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Mutants
+        run: cargo mutants --no-shuffle -p blink-core -p blink-xmp --test-tool nextest || true
+      - name: Surviving mutants become issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          f=mutants.out/missed.txt
+          if [ -s "$f" ]; then
+            gh issue create --title "Surviving mutants $(date -u +%F)" --label mutants \
+              --body "$(printf 'cargo-mutants found mutants that no test catches:\n\n```\n%s\n```\n' "$(head -n 200 $f)")"
+          else echo "no surviving mutants"; fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants
+          path: mutants.out
+          if-no-files-found: ignore
+
+  deny:
+    name: cargo deny (licenses, advisories)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  update-deps:
+    name: Dependency update PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          nextest: "false"
+      - run: cargo update 2>&1 | tee cargo-update.log
+      - uses: peter-evans/create-pull-request@v8
+        with:
+          branch: deps/weekly-cargo-update
+          title: "chore(deps): weekly cargo update"
+          commit-message: "chore(deps): weekly cargo update"
+          body: Automated `cargo update` (semver-compatible updates only). CI must be green before merge.
+          delete-branch: true

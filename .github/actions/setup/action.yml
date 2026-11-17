@@ -1,0 +1,25 @@
+name: Setup Rust
+description: Install the pinned toolchain (rust-toolchain.toml), cache, and cargo-nextest
+inputs:
+  cache-key:
+    description: Extra cache key
+    default: ""
+  nextest:
+    description: Install cargo-nextest
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install pinned toolchain
+      shell: bash
+      run: |
+        rustup toolchain install --no-self-update
+        rustc --version
+        cargo --version
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+    - if: inputs.nextest == 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest

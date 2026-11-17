@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  NEXTEST_PROFILE: ci
+
+jobs:
+  guard:
+    name: Guard (goldens, removed tests)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: ./.github/actions/setup
+        with:
+          nextest: "false"
+      - run: cargo xtask guard --base origin/${{ github.base_ref }}
+
+  test:
+    name: Test ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm }
+          - { name: macos-arm64, os: macos-15 }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: windows-x86_64, os: windows-2025 }
+          - { name: windows-arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Install exiftool (oracle)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends libimage-exiftool-perl
+      - name: Corpus cache
+        uses: actions/cache@v6
+        with:
+          path: corpus/cache
+          key: corpus-${{ hashFiles('corpus/manifest.toml') }}
+      - run: cargo xtask corpus fetch
+      - name: Verify (full tier)
+        run: cargo xtask verify --full
+      - name: Trace report
+        if: always()
+        run: cargo xtask trace
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  perf:
+    name: Perf compare (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          nextest: "false"
+      - run: cargo xtask bench
