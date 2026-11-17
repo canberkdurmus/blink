@@ -63,11 +63,17 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           nextest: "false"
-      - run: cargo update 2>&1 | tee cargo-update.log
-      - uses: peter-evans/create-pull-request@v8
+      - run: cargo update
+      # Needs the repo setting "Allow GitHub Actions to create and approve pull requests"
+      # (see HUMAN_TODO.md). Until then the branch is still pushed and the agent opens the PR.
+      - id: cpr
+        uses: peter-evans/create-pull-request@v8
+        continue-on-error: true
         with:
           branch: deps/weekly-cargo-update
           title: "chore(deps): weekly cargo update"
           commit-message: "chore(deps): weekly cargo update"
           body: Automated `cargo update` (semver-compatible updates only). CI must be green before merge.
           delete-branch: true
+      - if: steps.cpr.outcome == 'failure'
+        run: echo "::warning::Could not open the PR (Actions may not create PRs in this repo). Branch deps/weekly-cargo-update was pushed; open the PR manually."
