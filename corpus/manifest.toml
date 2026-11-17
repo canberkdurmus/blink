@@ -1,0 +1,19 @@
+# Blink test corpus (SPEC §11.3).
+#
+# Files are fetched by `cargo xtask corpus fetch` into the git-ignored `corpus/cache/`.
+# Every entry records its license; only redistributable files (prefer CC0) are allowed.
+# Expected values are frozen: changing them requires a `golden-update:` commit trailer.
+#
+# Entry format:
+# [[file]]
+# path = "sony/ILCE-1.ARW"
+# sha256 = "…"
+# url = "https://raw.pixls.us/…"
+# license = "CC0-1.0"
+# camera = "Sony ILCE-1"
+# [file.expected]
+# preview_w = 0
+# preview_h = 0
+# badge = "EMBEDDED"
+# sensor_w = 0
+# sensor_h = 0

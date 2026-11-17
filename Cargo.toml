@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.100"
+repository = "https://github.com/canberkdurmus/blink"
+publish = false
+
+[workspace.dependencies]
+blink-core = { path = "crates/blink-core" }
+blink-runtime = { path = "crates/blink-runtime" }
+blink-ui = { path = "crates/blink-ui" }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+egui = "=0.37.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

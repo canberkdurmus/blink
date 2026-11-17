@@ -1,0 +1,19 @@
+[package]
+name = "blink"
+description = "Blink RAW culling app (GUI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blink-ui.workspace = true
+
+[[bin]]
+name = "blink"
+path = "src/main.rs"
