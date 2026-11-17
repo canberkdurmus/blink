@@ -3,6 +3,9 @@
 //! This crate performs no I/O (SPEC §8.2).
 #![forbid(unsafe_code)]
 
+pub mod formats;
+pub mod preview;
+
 /// Application name as shown to users (SPEC D-7).
 pub const APP_NAME: &str = "Blink";
 
