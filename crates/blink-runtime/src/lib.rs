@@ -4,6 +4,7 @@
 
 pub mod fs;
 pub mod paths;
+pub mod scan;
 
 /// Version string shared by the GUI and CLI.
 pub fn version() -> &'static str {
