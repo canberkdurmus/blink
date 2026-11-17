@@ -511,6 +511,7 @@ dependencies = [
  "blink-core",
  "blink-decode",
  "blink-testkit",
+ "blink-xmp",
  "directories",
 ]
 

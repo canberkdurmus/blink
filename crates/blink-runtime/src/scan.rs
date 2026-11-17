@@ -72,7 +72,10 @@ mod tests {
     #[test]
     fn req_open_1_non_recursive_lists_only_the_folder() {
         let got = scan_folder(&fs(), Path::new("/s"), false).unwrap();
-        assert_eq!(names(&got), [PathBuf::from("/s/1.ARW"), PathBuf::from("/s/1.JPG")]);
+        assert_eq!(
+            names(&got),
+            [PathBuf::from("/s/1.ARW"), PathBuf::from("/s/1.JPG")]
+        );
     }
 
     #[test]
@@ -80,7 +83,13 @@ mod tests {
         let got = scan_folder(&fs(), Path::new("/s"), true).unwrap();
         assert_eq!(
             names(&got),
-            ["/s/1.ARW", "/s/1.JPG", "/s/sub/2.ARW", "/s/sub/deeper/3.ARW"].map(PathBuf::from)
+            [
+                "/s/1.ARW",
+                "/s/1.JPG",
+                "/s/sub/2.ARW",
+                "/s/sub/deeper/3.ARW"
+            ]
+            .map(PathBuf::from)
         );
         assert!(scan_folder(&fs(), Path::new("/nope"), false).is_err());
     }
