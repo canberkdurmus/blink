@@ -63,7 +63,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           nextest: "false"
-      - run: cargo update 2>&1 | tee cargo-update.log
+      - run: cargo update
       # Needs the repo setting "Allow GitHub Actions to create and approve pull requests"
       # (see HUMAN_TODO.md). Until then the branch is still pushed and the agent opens the PR.
       - id: cpr
