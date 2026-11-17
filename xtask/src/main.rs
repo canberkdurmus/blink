@@ -32,7 +32,8 @@ fn main() -> ExitCode {
         ["trace", "--gate", m] => trace::run(trace::Mode::Full, Some(m)),
         ["corpus", "fetch"] => corpus::fetch(),
         ["fixtures"] => fixtures::run(),
-        ["bench"] => bench::run(),
+        ["bench"] => bench::run(false),
+        ["bench", "--allow-missing-baseline"] => bench::run(true),
         ["report", m] => report::run(m),
         ["guard", "--base", base] => guard::run(base),
         _ => Err(USAGE.to_string()),
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench | report Mn | guard --base REF>";
+const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench [--allow-missing-baseline] | report Mn | guard --base REF>";
 
 /// Workspace root (parent of the xtask crate).
 pub fn root() -> PathBuf {

@@ -81,7 +81,13 @@ pub fn compare(
                 };
                 (format!("{b:.1}"), format!("{d:+.1}%"), st)
             }
-            None => ("—".into(), "—".into(), "no baseline"),
+            None => {
+                fails.push(format!(
+                    "{}: no baseline for this target; record one with a golden-update commit",
+                    r.id
+                ));
+                ("—".into(), "—".into(), "NO BASELINE")
+            }
         };
         let budget = if r.median_ms <= r.budget_ms {
             "within budget"
@@ -96,7 +102,7 @@ pub fn compare(
     (lines, fails)
 }
 
-pub fn run() -> Result {
+pub fn run(allow_missing_baseline: bool) -> Result {
     let out = root().join("target").join("perf");
     let _ = std::fs::remove_dir_all(&out);
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -143,7 +149,10 @@ pub fn run() -> Result {
     let baseline = std::fs::read_to_string(&base_path)
         .map(|t| parse_baseline(&t))
         .unwrap_or_default();
-    let (lines, fails) = compare(&results, &baseline);
+    let (lines, mut fails) = compare(&results, &baseline);
+    if allow_missing_baseline {
+        fails.retain(|f| !f.contains("no baseline"));
+    }
     println!("bench ({key}, baseline {}):", base_path.display());
     for l in &lines {
         println!("  {l}");
@@ -185,7 +194,7 @@ mod tests {
         };
         assert!(compare(&r(54.9), &b).1.is_empty());
         assert_eq!(compare(&r(55.1), &b).1.len(), 1);
-        assert!(compare(&r(5.0), &BTreeMap::new()).1.is_empty());
+        assert_eq!(compare(&r(5.0), &BTreeMap::new()).1.len(), 1);
         assert_eq!(
             json_num("{\"median_ms\":75.5,\"x\":1}", "median_ms"),
             Some(75.5)

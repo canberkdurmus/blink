@@ -38,7 +38,8 @@ jobs:
           key: corpus-${{ hashFiles('corpus/manifest.toml') }}
       - run: cargo xtask corpus fetch
       - run: cargo xtask verify --full
-      - run: cargo xtask bench
+      # Targets without a recorded baseline only report (ADR 0008).
+      - run: cargo xtask bench --allow-missing-baseline
 
   soak:
     name: Soak (10 min random actions)

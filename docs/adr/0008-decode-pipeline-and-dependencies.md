@@ -20,6 +20,11 @@ convert Adobe RGB previews (VIEW-10) and do it fast (PERF-4). SPEC §8.4 fixes r
 | `moxcms` | `=0.9.2` | BSD-3-Clause OR Apache-2.0 | Pure Rust ICC CMS with built-in sRGB and Adobe RGB profiles and 8-bit transforms. It meets VIEW-10's ΔE2000 < 2 against an independent reference, so `lcms2` (C) isn't needed. |
 | `memchr` | `2` | MIT OR Unlicense | Already in the tree via rawler. SIMD `memmem` search for JPEG SOI markers: 53 MB in ~2 ms, against ~20 ms for a byte loop. |
 
+Dev tooling only (never in a shipped binary): **`jpeg-encoder` `=0.7.1`**, `(MIT OR Apache-2.0) AND IJG`,
+in `blink-testkit` (tests) and `xtask fixtures`. It's maintained (vstroebel), pure Rust, and builds wherever
+the tests run. IJG is a permissive attribution license, allowed in `deny.toml` with a comment saying it
+is dev-only.
+
 They all build on the 6 CI targets (pure Rust) and none adds network access, telemetry or an updater.
 
 ### Locating embedded images
@@ -61,7 +66,10 @@ flagged in the M1 gate report.
 `req_perf_4_…` builds a deterministic 6.1 MB, 6000×4000, 4:2:0, q90 JPEG, embeds it in a TIFF
 container next to a thumbnail, and times locate + choose + full decode on one thread (median of 5).
 `cargo xtask bench` runs it in release mode and compares the median with
-`perf/baseline-<target>.json` (> 10 % fails) and with the 25 ms budget.
+`perf/baseline-<target>.json` (> 10 % fails) and with the 25 ms budget. A perf
+result with no baseline for the current target fails bench, so the regression check can't be skipped
+by accident. CI runs bench on Linux x86-64 for every PR (SPEC §12); nightly runs it on all targets,
+and those baselines are added as nightly reports them.
 
 Measured on a 2023 mid-range laptop (Ryzen 7 PRO 7840U), release: **~76 ms**, about 3× the budget.
 The time is almost all zune-jpeg's full-resolution decode. Alternatives measured on a 13 MB JPEG:
@@ -74,7 +82,8 @@ The time is almost all zune-jpeg's full-resolution decode. Alternatives measured
 | jpeg-decoder, 1/4 DCT scaling | 135 ms |
 
 Entropy decoding dominates, so DCT scaling alone won't reach 25 ms. The budget is reported as
-**not met** in the gate report, and CI guards against regressions from the measured baseline.
+**not met** in the gate report, and CI guards against regressions from the measured baseline
+(`perf/baseline-linux-x86_64.json`, recorded from CI).
 Options for M2 (PERF-2/3, where held-key speed is actually felt):
 
 - decode previews at screen resolution, in parallel across restart intervals where the JPEG has them;
