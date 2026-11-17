@@ -1,6 +1,9 @@
 //! Blink runtime: effect executor, worker pools, prefetch, caches, watcher, atomic writes.
 //!
-//! All file-system access goes through the `Fs` trait (added in M1+).
+//! All file-system access goes through the [`fs::Fs`] trait.
+
+pub mod fs;
+pub mod paths;
 
 /// Version string shared by the GUI and CLI.
 pub fn version() -> &'static str {
