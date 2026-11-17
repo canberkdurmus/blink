@@ -1,13 +1,18 @@
 # Progress
 
-Current milestone: M0
+Current milestone: M1
 
 Ticked IDs list their tests. `cargo xtask trace` requires every ticked ID and every ID of earlier
 milestones to have a tagged, passing test.
 
 ## Next up
 
-M0 bootstrap: finish the workflows, `.claude/` setup, a green 6-target CI and the `v0.0.1-m0` pre-release.
+M1 Headless core. Start with the corpus, which unblocks almost every M1 ID: pick redistributable
+(CC0) files from raw.pixls.us covering SPEC §11.3, fill `corpus/manifest.toml` (bootstrap the expected
+values from exiftool), and add the synthetic fixture generator to xtask. Then, in dependency order:
+PLAT-2 (dirs/portable) → OPEN-4 + rawler `RawBackend` (ADR for rawler, zune-jpeg) → OPEN-1/OPEN-2
+(`Fs` trait + scan/pairing in runtime, pure pairing logic in core) → VIEW-2/VIEW-3/VIEW-8/VIEW-7 →
+VIEW-10 (moxcms ADR) → RATE-4 (blink-xmp read) → CLI-1/CLI-2 → PERF-4.
 
 ## M0 Foundations (infrastructure)
 
@@ -17,8 +22,8 @@ M0 bootstrap: finish the workflows, `.claude/` setup, a green 6-target CI and th
 - [x] Workflows: ci.yml (6 targets), nightly.yml, weekly.yml, release.yml
 - [x] `.claude/` settings, hooks, agents, skill
 - [x] CI green on all 6 targets (run 44182943822)
-- [ ] `v0.0.1-m0` pre-release built on all targets
-- [ ] Gate report docs/reports/M0.md
+- [x] `v0.0.1-m0` pre-release built on all targets
+- [x] Gate report docs/reports/M0.md
 
 ## M1 Headless core
 
@@ -85,3 +90,4 @@ M0 bootstrap: finish the workflows, `.claude/` setup, a green 6-target CI and th
 
 ## Session log
 
+- 2026-11-17 · M0 closed · workspace, xtask, 4 workflows green on 6 targets, .claude setup, v0.0.1-m0, ADRs 0001–0005
