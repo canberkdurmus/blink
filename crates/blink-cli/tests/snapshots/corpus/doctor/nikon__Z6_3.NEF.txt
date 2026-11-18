@@ -1,0 +1,29 @@
+file: Z6_3.NEF
+size: 6520320 bytes
+kind: RAW
+container: TIFF
+camera: NIKON Z6_3
+raw decoder: rawler 0.8.0: FAILED: raw: Failed to decode image, possibly corrupt image: NEF compression Some(HighEfficency) is not supported
+sensor: 4000 × 2672
+embedded images: 4
+  #0 JPEG 640 × 424 at offset 104680, 125933 bytes
+  #1 JPEG 160 × 120 at offset 230632, 10676 bytes
+  #2 JPEG 1620 × 1080 at offset 367616, 803433 bytes
+  #3 JPEG 3984 × 2656 at offset 1171456, 1340854 bytes  <- chosen
+chosen preview: JPEG 3984 × 2656
+low-res: no (preview long edge 3984 >= 50% of sensor long edge 4000)
+badge: EMBEDDED
+preview decode: ok 3984 × 2656, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: Z6_3.NEF
+  Body: NIKON Z6_3
+  Lens: NIKKOR Z 24-200mm f/4-6.3 VR
+  Focal length: 86 mm
+  Shutter: 1/60 s
+  Aperture: f/8
+  ISO: 200
+  Exposure comp.: 0 EV
+  Captured: 2024-06-29 15:38:47 -04:00
+  Dimensions: 4000 × 2672
+  Preview: EMBEDDED · 3984 × 2656

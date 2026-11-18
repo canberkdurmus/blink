@@ -1,0 +1,27 @@
+file: E-M10.ORF
+size: 15258356 bytes
+kind: RAW
+container: TIFF (Olympus ORF)
+camera: OLYMPUS IMAGING CORP. E-M10
+raw decoder: rawler 0.8.0: ok (Olympus E-M10, sensor 4608 × 3456)
+sensor: 4608 × 3456
+embedded images: 2
+  #0 JPEG 160 × 120 at offset 23072, 9358 bytes
+  #1 JPEG 3200 × 2400 at offset 52224, 918873 bytes  <- chosen
+chosen preview: JPEG 3200 × 2400
+low-res: no (preview long edge 3200 >= 50% of sensor long edge 4608)
+badge: EMBEDDED
+preview decode: ok 3200 × 2400, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: E-M10.ORF
+  Body: OLYMPUS IMAGING CORP. E-M10
+  Lens: OLYMPUS M.40-150mm F4.0-5.6 R
+  Focal length: 58 mm
+  Shutter: 1/2000 s
+  Aperture: f/4.4
+  ISO: 200
+  Exposure comp.: 0 EV
+  Captured: 2017-03-18 15:54:01
+  Dimensions: 4608 × 3456
+  Preview: EMBEDDED · 3200 × 2400

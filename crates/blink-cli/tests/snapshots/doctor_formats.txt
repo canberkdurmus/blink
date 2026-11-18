@@ -1,0 +1,4 @@
+RAW (rawler 0.8.0): 3fr, ari, arw, cr2, cr3, crw, dcr, dcs, erf, fff, iiq, kdc, mef, mos, mrw, nef, nrw, orf, ori, pef, qtk, raf, raw, rw2, rwl, srw, x3f
+DNG: dng
+JPEG: jpg, jpeg, jpe
+HEIF (listed and paired, not decoded in v1): heic, heif, hif

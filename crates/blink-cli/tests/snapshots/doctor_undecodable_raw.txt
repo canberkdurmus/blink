@@ -1,0 +1,25 @@
+file: b.NEF
+size: 16 bytes
+kind: RAW
+container: unknown
+camera: unknown
+raw decoder: rawler 0.8.0: FAILED: raw: Error: No decoder found, model '', make: '', mode: ''
+sensor: unknown
+embedded images: 0
+chosen preview: none
+low-res: unknown (no preview or sensor size)
+badge: NO PREVIEW
+preview decode: not attempted
+timing: read <t> ms, analyze <t> ms
+info:
+  File: b.NEF
+  Body: —
+  Lens: —
+  Focal length: —
+  Shutter: —
+  Aperture: —
+  ISO: —
+  Exposure comp.: —
+  Captured: —
+  Dimensions: —
+  Preview: NO PREVIEW

@@ -1,0 +1,7 @@
+/f/a.ARW
+/f/a.JPG
+/f/b.NEF
+/f/b.HEIC
+/f/c.JPG
+/f/d.DNG
+/f/sub/e.ARW

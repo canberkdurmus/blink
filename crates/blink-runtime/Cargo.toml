@@ -14,8 +14,8 @@ workspace = true
 [dependencies]
 blink-core.workspace = true
 directories = "=6.0.0"
+blink-decode = { path = "../blink-decode" }
 blink-xmp = { path = "../blink-xmp" }
 
 [dev-dependencies]
-blink-decode = { path = "../blink-decode" }
 blink-testkit = { path = "../blink-testkit" }

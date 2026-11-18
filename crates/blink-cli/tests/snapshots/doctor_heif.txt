@@ -1,0 +1,20 @@
+file: b.HEIC
+size: 4 bytes
+kind: HEIF
+container: unknown
+camera: unknown
+badge: NO PREVIEW
+preview decode: not attempted
+timing: read <t> ms, analyze <t> ms
+info:
+  File: b.HEIC
+  Body: —
+  Lens: —
+  Focal length: —
+  Shutter: —
+  Aperture: —
+  ISO: —
+  Exposure comp.: —
+  Captured: —
+  Dimensions: —
+  Preview: NO PREVIEW

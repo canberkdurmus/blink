@@ -1,0 +1,27 @@
+file: X-S10.RAF
+size: 25812976 bytes
+kind: RAW
+container: Fujifilm RAF
+camera: FUJIFILM X-S10
+raw decoder: rawler 0.8.0: ok (Fujifilm X-S10, sensor 6240 × 4160)
+sensor: 6240 × 4160
+embedded images: 2
+  #0 JPEG 4416 × 2944 at offset 148, 2817086 bytes  <- chosen
+  #1 JPEG 160 × 120 at offset 3984, 9553 bytes
+chosen preview: JPEG 4416 × 2944
+low-res: no (preview long edge 4416 >= 50% of sensor long edge 6240)
+badge: EMBEDDED
+preview decode: ok 4416 × 2944, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: X-S10.RAF
+  Body: FUJIFILM X-S10
+  Lens: XF16-80mmF4 R OIS WR
+  Focal length: 69.8 mm
+  Shutter: 0.36 s
+  Aperture: f/4
+  ISO: 160
+  Exposure comp.: 0 EV
+  Captured: 2020-11-28 18:42:23
+  Dimensions: 6240 × 4160
+  Preview: EMBEDDED · 4416 × 2944

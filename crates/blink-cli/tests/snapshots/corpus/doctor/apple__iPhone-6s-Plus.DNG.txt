@@ -1,0 +1,26 @@
+file: iPhone-6s-Plus.DNG
+size: 10227467 bytes
+kind: DNG
+container: TIFF
+camera: Apple iPhone 6s Plus
+raw decoder: rawler 0.8.0: ok (Apple iPhone 6s Plus, sensor 4032 × 3024)
+sensor: 4032 × 3024
+embedded images: 1
+  #0 JPEG 852 × 640 at offset 3160, 133392 bytes  <- chosen
+chosen preview: JPEG 852 × 640
+low-res: yes (preview long edge 852 < 50% of sensor long edge 4032)
+badge: EMBEDDED · LOW-RES
+preview decode: ok 852 × 640, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: iPhone-6s-Plus.DNG
+  Body: Apple iPhone 6s Plus
+  Lens: iPhone 6s Plus back camera 4.15mm f/2.2
+  Focal length: 4.2 mm
+  Shutter: 1/5495 s
+  Aperture: f/2.2
+  ISO: 25
+  Exposure comp.: 0 EV
+  Captured: 2016-12-19 15:10:15
+  Dimensions: 4032 × 3024
+  Preview: EMBEDDED · LOW-RES · 852 × 640

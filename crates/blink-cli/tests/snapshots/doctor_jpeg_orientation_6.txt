@@ -1,0 +1,20 @@
+file: c.JPG
+size: 819 bytes
+kind: JPEG
+container: JPEG
+camera: unknown
+badge: JPEG
+preview decode: ok 64 × 32, from sRGB, orientation 6 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: c.JPG
+  Body: —
+  Lens: —
+  Focal length: —
+  Shutter: —
+  Aperture: —
+  ISO: —
+  Exposure comp.: —
+  Captured: —
+  Dimensions: 64 × 32
+  Preview: JPEG · 64 × 32

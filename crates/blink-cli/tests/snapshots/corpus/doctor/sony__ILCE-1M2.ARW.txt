@@ -1,0 +1,28 @@
+file: ILCE-1M2.ARW
+size: 53440512 bytes
+kind: RAW
+container: TIFF
+camera: SONY ILCE-1M2
+raw decoder: rawler 0.8.0: ok (Sony ILCE-1M2, sensor 8640 × 5760)
+sensor: 8640 × 5760
+embedded images: 3
+  #0 JPEG 160 × 120 at offset 44228, 4790 bytes
+  #1 JPEG 1616 × 1080 at offset 196770, 151376 bytes
+  #2 JPEG 8640 × 5760 at offset 348160, 2929304 bytes  <- chosen
+chosen preview: JPEG 8640 × 5760
+low-res: no (preview long edge 8640 >= 50% of sensor long edge 8640)
+badge: EMBEDDED
+preview decode: ok 8640 × 5760, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: ILCE-1M2.ARW
+  Body: SONY ILCE-1M2
+  Lens: FE 70-200mm F2.8 GM OSS II
+  Focal length: 133 mm
+  Shutter: 1/1000 s
+  Aperture: f/2.8
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2025-05-09 09:35:49 +01:00
+  Dimensions: 8640 × 5760
+  Preview: EMBEDDED · 8640 × 5760
