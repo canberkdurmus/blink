@@ -30,6 +30,8 @@ allow = [
   "MPL-2.0",
   "LGPL-2.1",
   "LGPL-2.1-or-later",
+  # jpeg-encoder (dev-only fixtures in blink-testkit; never shipped)
+  "IJG",
   # egui's bundled default fonts
   "OFL-1.1",
   "Ubuntu-font-1.0",

@@ -29,3 +29,15 @@ todo = "deny"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Decoders are far too slow unoptimised; tests decode real files.
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.rawler]
+opt-level = 3
+[profile.dev.package.moxcms]
+opt-level = 3
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
