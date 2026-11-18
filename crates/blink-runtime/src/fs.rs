@@ -91,6 +91,7 @@ pub enum FsCall {
 pub struct MemFs {
     files: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
     dirs: Mutex<BTreeMap<PathBuf, ()>>,
+    mtimes: Mutex<BTreeMap<PathBuf, SystemTime>>,
     log: Mutex<Vec<FsCall>>,
 }
 
@@ -116,6 +117,15 @@ impl MemFs {
                 dirs.insert(a.to_path_buf(), ());
             }
         }
+    }
+
+    /// Set a file's modification time.
+    pub fn set_modified(&self, path: impl Into<PathBuf>, t: SystemTime) {
+        lock(&self.mtimes).insert(path.into(), t);
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        lock(&self.mtimes).get(path).copied()
     }
 
     /// Every call made so far, in order.
@@ -147,11 +157,11 @@ impl Fs for MemFs {
 
     fn metadata(&self, path: &Path) -> io::Result<Meta> {
         self.record(FsCall::Metadata(path.to_path_buf()));
-        if let Some(b) = lock(&self.files).get(path) {
+        if let Some(len) = lock(&self.files).get(path).map(|b| b.len() as u64) {
             return Ok(Meta {
                 is_dir: false,
-                len: b.len() as u64,
-                modified: None,
+                len,
+                modified: self.modified(path),
             });
         }
         if lock(&self.dirs).contains_key(path) {
@@ -170,17 +180,21 @@ impl Fs for MemFs {
             return Err(not_found(path));
         }
         let mut out = Vec::new();
-        for (p, b) in lock(&self.files).iter() {
-            if p.parent() == Some(path) {
-                out.push(DirEntry {
-                    path: p.clone(),
-                    meta: Meta {
-                        is_dir: false,
-                        len: b.len() as u64,
-                        modified: None,
-                    },
-                });
-            }
+        let files: Vec<(PathBuf, u64)> = lock(&self.files)
+            .iter()
+            .filter(|(p, _)| p.parent() == Some(path))
+            .map(|(p, b)| (p.clone(), b.len() as u64))
+            .collect();
+        for (p, len) in files {
+            let modified = self.modified(&p);
+            out.push(DirEntry {
+                path: p,
+                meta: Meta {
+                    is_dir: false,
+                    len,
+                    modified,
+                },
+            });
         }
         for p in lock(&self.dirs).keys() {
             if p.parent() == Some(path) {
