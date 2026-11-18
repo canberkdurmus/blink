@@ -23,6 +23,8 @@ pub struct Meta {
 pub struct DirEntry {
     pub path: PathBuf,
     pub meta: Meta,
+    /// The entry itself is a symlink (or, on Windows, a junction); `meta` describes its target.
+    pub is_link: bool,
 }
 
 /// File-system access used by the runtime, the CLI and the UI.
@@ -65,11 +67,14 @@ impl Fs for RealFs {
         for e in std::fs::read_dir(path)? {
             let e = e?;
             let path = e.path();
+            // Windows: junctions are name-surrogate reparse points, which std reports as symlinks.
+            let is_link = e.file_type().is_ok_and(|t| t.is_symlink());
             // Follow symlinks; skip entries that vanished or are dangling.
             if let Ok(m) = std::fs::metadata(&path) {
                 out.push(DirEntry {
                     path,
                     meta: meta_of(&m),
+                    is_link,
                 });
             }
         }
@@ -90,7 +95,8 @@ pub enum FsCall {
 #[derive(Debug, Default)]
 pub struct MemFs {
     files: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
-    dirs: Mutex<BTreeMap<PathBuf, ()>>,
+    /// Directory → whether it is a symlinked directory.
+    dirs: Mutex<BTreeMap<PathBuf, bool>>,
     mtimes: Mutex<BTreeMap<PathBuf, SystemTime>>,
     log: Mutex<Vec<FsCall>>,
 }
@@ -114,9 +120,15 @@ impl MemFs {
         let mut dirs = lock(&self.dirs);
         for a in path.as_ref().ancestors() {
             if !a.as_os_str().is_empty() {
-                dirs.insert(a.to_path_buf(), ());
+                dirs.entry(a.to_path_buf()).or_insert(false);
             }
         }
+    }
+
+    /// Add a directory that is a symlink (or junction) to another directory.
+    pub fn add_dir_link(&self, path: impl AsRef<Path>) {
+        self.add_dir(&path);
+        lock(&self.dirs).insert(path.as_ref().to_path_buf(), true);
     }
 
     /// Set a file's modification time.
@@ -194,9 +206,10 @@ impl Fs for MemFs {
                     len,
                     modified,
                 },
+                is_link: false,
             });
         }
-        for p in lock(&self.dirs).keys() {
+        for (p, &is_link) in lock(&self.dirs).iter() {
             if p.parent() == Some(path) {
                 out.push(DirEntry {
                     path: p.clone(),
@@ -205,6 +218,7 @@ impl Fs for MemFs {
                         len: 0,
                         modified: None,
                     },
+                    is_link,
                 });
             }
         }
