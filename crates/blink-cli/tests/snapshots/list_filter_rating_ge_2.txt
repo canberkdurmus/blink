@@ -1,0 +1,3 @@
+a.ARW	RAW	+JPG	4	Red
+d.DNG	DNG	-	5	Green
+sub/e.ARW	RAW	-	2	Purple

@@ -484,7 +484,9 @@ name = "blink-cli"
 version = "0.0.1"
 dependencies = [
  "blink-core",
+ "blink-decode",
  "blink-runtime",
+ "blink-testkit",
 ]
 
 [[package]]

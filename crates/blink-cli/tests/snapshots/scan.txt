@@ -1,0 +1,4 @@
+recursive: no
+files: 6 supported (raw 2, dng 1, jpeg 2, heif 1)
+items: 4 (2 pairs)
+rated: 3, labelled: 2

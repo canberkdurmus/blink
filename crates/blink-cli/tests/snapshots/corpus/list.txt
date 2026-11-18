@@ -1,0 +1,12 @@
+apple/iPhone-6s-Plus.DNG	DNG	-	-	-
+canon/EOS-20D.CR2	RAW	-	-	-
+canon/EOS-R6.CR3	RAW	-	-	-
+fujifilm/X-S10.RAF	RAW	-	-	-
+leica/M8.DNG	DNG	-	-	-
+nikon/Z-6.NEF	RAW	-	-	-
+nikon/Z6_3.NEF	RAW	-	-	-
+olympus/E-M10.ORF	RAW	-	-	-
+panasonic/DMC-LX7.RW2	RAW	-	-	-
+pentax/K10D.PEF	RAW	-	-	-
+sony/ILCE-1M2.ARW	RAW	-	-	-
+sony/NEX-5N.ARW	RAW	-	-	-

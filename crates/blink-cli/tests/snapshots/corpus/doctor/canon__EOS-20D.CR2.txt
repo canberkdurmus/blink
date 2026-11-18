@@ -1,0 +1,27 @@
+file: EOS-20D.CR2
+size: 7489116 bytes
+kind: RAW
+container: TIFF
+camera: Canon EOS 20D
+raw decoder: rawler 0.8.0: ok (Canon EOS 20D, sensor 3504 × 2336)
+sensor: 3504 × 2336
+embedded images: 2
+  #0 JPEG 1536 × 1024 at offset 9728, 251390 bytes  <- chosen
+  #1 JPEG 160 × 120 at offset 261630, 6162 bytes
+chosen preview: JPEG 1536 × 1024
+low-res: yes (preview long edge 1536 < 50% of sensor long edge 3504)
+badge: EMBEDDED · LOW-RES
+preview decode: ok 1536 × 1024, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: EOS-20D.CR2
+  Body: Canon EOS 20D
+  Lens: —
+  Focal length: 75 mm
+  Shutter: 1/125 s
+  Aperture: f/2.8
+  ISO: 800
+  Exposure comp.: 0 EV
+  Captured: 2017-01-31 02:14:26
+  Dimensions: 3504 × 2336
+  Preview: EMBEDDED · LOW-RES · 1536 × 1024

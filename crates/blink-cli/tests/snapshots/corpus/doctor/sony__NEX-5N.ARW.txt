@@ -1,0 +1,27 @@
+file: NEX-5N.ARW
+size: 17072128 bytes
+kind: RAW
+container: TIFF
+camera: SONY NEX-5N
+raw decoder: rawler 0.8.0: ok (Sony NEX-5N, sensor 4912 × 3264)
+sensor: 4912 × 3264
+embedded images: 2
+  #0 JPEG 160 × 120 at offset 40358, 10839 bytes
+  #1 JPEG 1616 × 1080 at offset 118946, 790147 bytes  <- chosen
+chosen preview: JPEG 1616 × 1080
+low-res: yes (preview long edge 1616 < 50% of sensor long edge 4912)
+badge: EMBEDDED · LOW-RES
+preview decode: ok 1616 × 1080, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: NEX-5N.ARW
+  Body: SONY NEX-5N
+  Lens: E 18-55mm F3.5-5.6 OSS
+  Focal length: 18 mm
+  Shutter: 1/200 s
+  Aperture: f/7.1
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2012-07-15 16:30:58
+  Dimensions: 4912 × 3264
+  Preview: EMBEDDED · LOW-RES · 1616 × 1080
