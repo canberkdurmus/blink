@@ -38,7 +38,7 @@ VIEW-10 (moxcms ADR) → RATE-4 (blink-xmp read) → CLI-1/CLI-2 → PERF-4.
 - [ ] RATE-4
 - [ ] CLI-1
 - [ ] CLI-2
-- [ ] PLAT-2
+- [x] PLAT-2 — `req_plat_2_portable_marker_puts_config_and_cache_next_to_binary`, `req_plat_2_without_marker_uses_platform_standard_dirs`, `req_plat_2_marker_must_be_a_file_next_to_the_binary` (#5)
 - [ ] PERF-4
 
 ## M2 Loupe and speed

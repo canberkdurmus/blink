@@ -112,3 +112,5 @@ last 30 lines; move older lines to `docs/history.md`.
 ## Learned
 
 (Append short, durable lessons here: tool quirks, platform gotchas. One line each. Prune when over 30 lines.)
+- CI "Perf compare (Linux)" can fail on a slower runner host (+20–25 %, all 5 runs uniformly slow). Rerun only the failed job (`gh run rerun <id> --failed`); never raise the baseline for it.
+- Auto mode blocks force-pushes: after rebasing a pushed branch, push it under a new branch name.
