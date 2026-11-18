@@ -73,11 +73,19 @@ pub enum Effect {
         folder: PathBuf,
         recursive: bool,
     },
-    /// Write `marks` into the sidecar of `source` (sidecar naming: FILE-4).
+    /// Apply `change` to the sidecar of `source` (sidecar naming: FILE-4). Only the changed
+    /// field is carried, so a writer never clears a field it wasn't asked to touch.
     WriteSidecar {
         source: PathBuf,
-        marks: Marks,
+        change: MarkChange,
     },
+}
+
+/// One field change for a sidecar write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkChange {
+    /// Set `xmp:Rating` (−1…5).
+    Rating(i8),
 }
 
 /// The pure reducer.
@@ -119,8 +127,11 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             }
         }
         Action::MarksLoaded(list) => {
+            // Loading runs off-thread: a field the user already set wins over the file's value.
             for (path, m) in list {
-                s.marks.insert(path, m);
+                let e = s.marks.entry(path).or_default();
+                e.rating = e.rating.or(m.rating);
+                e.label = e.label.take().or(m.label);
             }
         }
         Action::SetRating { item, rating } => {
@@ -133,7 +144,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 for member in it.members() {
                     fx.push(Effect::WriteSidecar {
                         source: member.path.clone(),
-                        marks: m.clone(),
+                        change: MarkChange::Rating(rating),
                     });
                 }
                 s.marks.insert(key, m);
@@ -219,7 +230,7 @@ mod tests {
                 .iter()
                 .map(|p| Effect::WriteSidecar {
                     source: p.into(),
-                    marks: want.clone()
+                    change: MarkChange::Rating(3)
                 })
                 .collect::<Vec<_>>()
         );
@@ -235,5 +246,25 @@ mod tests {
                 .1
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn req_rate_4_late_marks_load_does_not_override_user_rating() {
+        let s = opened(&["a.ARW", "b.ARW"]);
+        let (s, _) = reduce(&s, Action::SetRating { item: 0, rating: 3 });
+        let disk = |r: i8, l: &str| Marks {
+            rating: Some(r),
+            label: Some(l.into()),
+        };
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![
+                ("/f/a.ARW".into(), disk(1, "Red")),
+                ("/f/b.ARW".into(), disk(4, "Blue")),
+            ]),
+        );
+        // The user's 3 stays; the file's label still shows; untouched items load as on disk.
+        assert_eq!(s.marks.get(Path::new("/f/a.ARW")), Some(&disk(3, "Red")));
+        assert_eq!(s.marks.get(Path::new("/f/b.ARW")), Some(&disk(4, "Blue")));
     }
 }

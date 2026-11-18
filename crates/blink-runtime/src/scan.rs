@@ -9,7 +9,8 @@ use std::path::Path;
 pub const REJECTED_DIR: &str = "_rejected";
 
 /// List the files in `folder`; with `recursive`, also every sub-folder except hidden ones and
-/// `_rejected`. Sorted by path. Errors only if `folder` itself can't be read; unreadable
+/// `_rejected`. Symlinked directories (and junctions) are not descended into, so link loops
+/// can't make a recursive scan run forever. Sorted by path. Errors only if `folder` itself can't be read; unreadable
 /// sub-folders are skipped.
 pub fn scan_folder(fs: &dyn Fs, folder: &Path, recursive: bool) -> io::Result<Vec<ScannedFile>> {
     let mut out = Vec::new();
@@ -29,7 +30,7 @@ pub fn scan_folder(fs: &dyn Fs, folder: &Path, recursive: bool) -> io::Result<Ve
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if e.meta.is_dir {
-                if recursive && !name.starts_with('.') && name != REJECTED_DIR {
+                if recursive && !e.is_link && !name.starts_with('.') && name != REJECTED_DIR {
                     stack.push(e.path);
                 }
             } else {
@@ -103,5 +104,31 @@ mod tests {
                 .iter()
                 .all(|c| matches!(c, crate::fs::FsCall::ReadDir(_)))
         );
+    }
+
+    #[test]
+    fn req_open_1_recursive_does_not_follow_directory_links() {
+        let fs = fs();
+        fs.add_dir_link("/s/loop");
+        fs.add_file("/s/loop/9.ARW", b"x".to_vec());
+        let got = scan_folder(&fs, Path::new("/s"), true).unwrap();
+        assert!(!names(&got).contains(&PathBuf::from("/s/loop/9.ARW")));
+        assert_eq!(got.len(), 4);
+    }
+
+    /// A real `link -> ..` loop terminates (Unix; Windows junctions are covered by
+    /// `FileType::is_symlink` reporting name-surrogate reparse points).
+    #[cfg(unix)]
+    #[test]
+    fn req_open_1_recursive_scan_terminates_on_a_real_symlink_loop() {
+        use crate::fs::RealFs;
+        let root = std::env::temp_dir().join(format!("blink-scan-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.ARW"), b"x").unwrap();
+        std::os::unix::fs::symlink("..", root.join("sub/up")).unwrap();
+        let got = scan_folder(&RealFs, &root, true);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(names(&got.unwrap()), [root.join("sub/a.ARW")]);
     }
 }
