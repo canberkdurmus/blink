@@ -4,7 +4,9 @@
 #![forbid(unsafe_code)]
 
 pub mod formats;
+pub mod item;
 pub mod preview;
+pub mod state;
 
 /// Application name as shown to users (SPEC D-7).
 pub const APP_NAME: &str = "Blink";
