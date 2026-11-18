@@ -1,2 +1,2 @@
-would write b.NEF: xmp:Rating=-1 xmp:Label=Blue
-would write b.HEIC: xmp:Rating=-1 xmp:Label=Blue
+would update sidecar of b.NEF: set xmp:Label=Blue
+would update sidecar of b.HEIC: set xmp:Label=Blue

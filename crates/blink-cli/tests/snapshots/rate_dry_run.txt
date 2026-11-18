@@ -1,2 +1,2 @@
-would write a.ARW: xmp:Rating=3 xmp:Label=Red
-would write a.JPG: xmp:Rating=3 xmp:Label=Red
+would update sidecar of a.ARW: set xmp:Rating=3
+would update sidecar of a.JPG: set xmp:Rating=3

@@ -64,6 +64,8 @@ pub enum Action {
     MarksLoaded(Vec<(PathBuf, Marks)>),
     /// Set the star rating (−1…5) of an item; applies to every member (OPEN-2).
     SetRating { item: usize, rating: i8 },
+    /// Set (`Some`) or clear (`None`) the colour label of an item; applies to every member.
+    SetLabel { item: usize, label: Option<String> },
 }
 
 /// Work for the runtime.
@@ -86,6 +88,8 @@ pub enum Effect {
 pub enum MarkChange {
     /// Set `xmp:Rating` (−1…5).
     Rating(i8),
+    /// Set `xmp:Label` (`None` removes it).
+    Label(Option<String>),
 }
 
 /// The pure reducer.
@@ -148,6 +152,18 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     });
                 }
                 s.marks.insert(key, m);
+            }
+        }
+        Action::SetLabel { item, label } => {
+            if let Some(it) = s.items.get(item) {
+                let key = it.primary.path.clone();
+                for member in it.members() {
+                    fx.push(Effect::WriteSidecar {
+                        source: member.path.clone(),
+                        change: MarkChange::Label(label.clone()),
+                    });
+                }
+                s.marks.entry(key).or_default().label = label;
             }
         }
     }
@@ -266,5 +282,41 @@ mod tests {
         // The user's 3 stays; the file's label still shows; untouched items load as on disk.
         assert_eq!(s.marks.get(Path::new("/f/a.ARW")), Some(&disk(3, "Red")));
         assert_eq!(s.marks.get(Path::new("/f/b.ARW")), Some(&disk(4, "Blue")));
+    }
+
+    #[test]
+    fn req_open_2_label_applies_to_every_pair_member_and_only_the_label_changes() {
+        let s = opened(&["a.ARW", "a.JPG"]);
+        let (s, _) = reduce(&s, Action::SetRating { item: 0, rating: 2 });
+        let (s, fx) = reduce(
+            &s,
+            Action::SetLabel {
+                item: 0,
+                label: Some("Blue".into()),
+            },
+        );
+        assert_eq!(
+            fx,
+            ["/f/a.ARW", "/f/a.JPG"]
+                .iter()
+                .map(|p| Effect::WriteSidecar {
+                    source: p.into(),
+                    change: MarkChange::Label(Some("Blue".into()))
+                })
+                .collect::<Vec<_>>()
+        );
+        let want = Marks {
+            rating: Some(2),
+            label: Some("Blue".into()),
+        };
+        assert_eq!(s.marks.get(Path::new("/f/a.ARW")), Some(&want));
+        let (s, _) = reduce(
+            &s,
+            Action::SetLabel {
+                item: 0,
+                label: None,
+            },
+        );
+        assert_eq!(s.marks.get(Path::new("/f/a.ARW")).unwrap().label, None);
     }
 }
