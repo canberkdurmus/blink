@@ -3,7 +3,7 @@
 use blink_core::filter::Filter;
 use blink_core::formats::{FileKind, Formats};
 use blink_core::item::Item;
-use blink_core::state::{Action, Marks, State, reduce};
+use blink_core::state::{Action, Effect, MarkChange, Marks, State, reduce};
 use blink_decode::raw::RawBackend;
 use blink_runtime::fs::{Fs, RealFs};
 use std::fmt::Write as _;
@@ -302,60 +302,64 @@ fn cmd_mark(
         return Err(format!("expected <file> <value>\n{USAGE}"));
     };
     let file = PathBuf::from(file);
-    let folder = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    // A bare file name has an empty parent: that's the current folder.
+    let folder = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let name = file.file_name().ok_or("expected a file")?;
     let s = open(fs, backend, &folder, false)?;
     let idx = s
         .items
         .iter()
-        .position(|i| i.members().any(|m| m.path == file))
+        .position(|i| i.members().any(|m| m.path.file_name() == Some(name)))
         .ok_or_else(|| format!("{}: not a supported file in its folder", file.display()))?;
-    let (rating, label) = if cmd == "rate" {
-        let r: i8 = value
+    let action = if cmd == "rate" {
+        let rating: i8 = value
             .parse()
             .ok()
             .filter(|r| (-1..=5).contains(r))
             .ok_or("rating must be -1..5")?;
-        (Some(r), None)
+        Action::SetRating { item: idx, rating }
     } else {
         const LABELS: [&str; 5] = ["Red", "Yellow", "Green", "Blue", "Purple"];
-        let l = if value.eq_ignore_ascii_case("none") {
-            String::new()
+        let label = if value.eq_ignore_ascii_case("none") {
+            None
         } else {
-            LABELS
-                .iter()
-                .find(|l| l.eq_ignore_ascii_case(value))
-                .ok_or("label must be Red, Yellow, Green, Blue, Purple or none")?
-                .to_string()
+            Some(
+                LABELS
+                    .iter()
+                    .find(|l| l.eq_ignore_ascii_case(value))
+                    .ok_or("label must be Red, Yellow, Green, Blue, Purple or none")?
+                    .to_string(),
+            )
         };
-        (None, Some(l))
+        Action::SetLabel { item: idx, label }
     };
-    let item = &s.items[idx];
-    let mut marks = s.marks.get(&item.primary.path).cloned().unwrap_or_default();
-    if let Some(r) = rating {
-        marks.rating = Some(r);
-    }
-    if let Some(l) = label {
-        marks.label = (!l.is_empty()).then_some(l);
-    }
     if !o.dry_run {
         return Err(
             "writing sidecars arrives in M3 (FILE-4..6); use --dry-run to see the plan".into(),
         );
     }
-    for m in item.members() {
-        let _ = writeln!(
-            out,
-            "would write {}: xmp:Rating={} xmp:Label={}",
-            m.path
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default(),
-            marks
-                .rating
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "-".into()),
-            marks.label.as_deref().unwrap_or("-")
-        );
+    // Same reducer as the GUI: print exactly the sidecar effects it plans.
+    let (_, effects) = reduce(&s, action);
+    for e in effects {
+        if let Effect::WriteSidecar { source, change } = e {
+            let change = match change {
+                MarkChange::Rating(r) => format!("set xmp:Rating={r}"),
+                MarkChange::Label(Some(l)) => format!("set xmp:Label={l}"),
+                MarkChange::Label(None) => "remove xmp:Label".into(),
+            };
+            let _ = writeln!(
+                out,
+                "would update sidecar of {}: {change}",
+                source
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default()
+            );
+        }
     }
     Ok(())
 }
@@ -606,6 +610,19 @@ mod tests {
         let (code, out) = cli(&fs, &["label", "--dry-run", "/f/b.HEIC", "blue"]);
         assert_eq!(code, 0);
         golden("label_dry_run.txt", &out);
+        let (code, out) = cli(&fs, &["label", "--dry-run", "/f/a.JPG", "none"]);
+        assert_eq!(code, 0);
+        golden("label_none_dry_run.txt", &out);
+        // A bare file name means the current folder.
+        let cwd = MemFs::new();
+        cwd.add_file("./x.ARW", b"raw".to_vec());
+        cwd.add_file("./x.JPG", b"jpg".to_vec());
+        let (code, out) = cli(&cwd, &["rate", "--dry-run", "x.ARW", "5"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            out,
+            "would update sidecar of x.ARW: set xmp:Rating=5\nwould update sidecar of x.JPG: set xmp:Rating=5\n"
+        );
         // Writing arrives with FILE-4..6 (ADR 0010); invalid values are rejected.
         assert_ne!(cli(&fs, &["rate", "/f/a.ARW", "3"]).0, 0);
         assert_ne!(cli(&fs, &["rate", "--dry-run", "/f/a.ARW", "7"]).0, 0);
