@@ -31,6 +31,17 @@ notify() { [[ -n "${NTFY_TOPIC:-}" ]] && curl -s -d "$1" "https://ntfy.sh/${NTFY
 
 GOAL='Advance Blink following CLAUDE.md and SPEC.md, starting from PROGRESS.md (or Bootstrap if the repo has no Cargo.toml). The goal is met when ANY of these is shown in this session: (a) the current milestone gate passed, its report docs/reports/Mn.md is committed and pushed, and PROGRESS.md names the next milestone; (b) .autopilot/DONE exists after the M5 gate; (c) .autopilot/NEEDS_HUMAN.md exists for a blocker only a human can resolve, per the Escalation section of CLAUDE.md; (d) about 250 turns have been used, all work is committed and pushed, and PROGRESS.md has a concrete handoff in "Next up". Constraints: main stays green; no test, golden or baseline weakened without the required trailer.'
 
+# Kill a session whose log has been silent this long (hung API stream, e.g. after laptop suspend).
+STALL_SECS=$(( ${STALL_MIN:-90} * 60 ))
+# Sleep that follows the wall clock, so time spent suspended counts.
+wall_sleep() { local until=$(( $(date +%s) + $1 )); while (( $(date +%s) < until )); do sleep 30; done; }
+
+# Best effort: keep the machine from idle-suspending while the autopilot runs.
+systemd-inhibit --what=sleep:idle --who=blink-autopilot --why="Blink autopilot running" sleep infinity 2>/dev/null &
+inhibit_pid=$!
+trap 'kill $inhibit_pid 2>/dev/null' EXIT
+sleep 1; kill -0 $inhibit_pid 2>/dev/null || echo "note: could not inhibit suspend; keep the machine awake yourself"
+
 fails=0
 for ((i = 1; i <= MAX_SESSIONS; i++)); do
   if [[ -f .autopilot/DONE ]]; then echo "Final gate reached."; notify "Blink: final gate reached, v1.0.0-rc ready for you."; exit 0; fi
@@ -40,11 +51,21 @@ for ((i = 1; i <= MAX_SESSIONS; i++)); do
   ts=$(date -u +%Y%m%dT%H%M%SZ)
   start=$(date +%s)
   # --settings outranks project settings: commits and PRs never credit Claude.
-  claude -p "/goal ${GOAL}" --permission-mode auto --strict-mcp-config \
+  log=".autopilot/logs/${ts}.jsonl"
+  setsid claude -p "/goal ${GOAL}" --permission-mode auto --strict-mcp-config \
     --settings '{"attribution":{"commit":"","pr":""},"includeCoAuthoredBy":false}' \
     --output-format stream-json --verbose \
-    < /dev/null > ".autopilot/logs/${ts}.jsonl" 2>&1
-  code=$?
+    < /dev/null > "$log" 2>&1 &
+  cpid=$!
+  while kill -0 "$cpid" 2>/dev/null; do
+    sleep 60
+    idle=$(( $(date +%s) - $(stat -c %Y "$log") ))
+    if (( idle > STALL_SECS )) && kill -0 "$cpid" 2>/dev/null; then
+      echo "${ts} watchdog: log silent for ${idle}s, killing session" | tee -a .autopilot/sessions.log
+      kill -TERM -- "-$cpid" 2>/dev/null; sleep 15; kill -KILL -- "-$cpid" 2>/dev/null
+    fi
+  done
+  wait "$cpid"; code=$?
   dur=$(( $(date +%s) - start ))
   echo "${ts} session=${i} exit=${code} duration=${dur}s" | tee -a .autopilot/sessions.log
 
@@ -54,10 +75,10 @@ for ((i = 1; i <= MAX_SESSIONS; i++)); do
   # Very short sessions usually mean a usage limit or an outage: back off (15 min steps, max 2 h).
   if (( dur < 300 )); then
     fails=$(( fails < 8 ? fails + 1 : 8 ))
-    sleep $(( fails * 900 ))
+    wall_sleep $(( fails * 900 ))
   else
     fails=0
-    sleep 30
+    wall_sleep 30
   fi
 done
 echo "Reached MAX_SESSIONS=${MAX_SESSIONS}."
