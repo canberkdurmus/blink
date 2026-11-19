@@ -119,7 +119,8 @@ pub fn run(allow_missing_baseline: bool) -> Result {
             "--test-threads",
             "1",
             "-E",
-            "test(/req_perf_/)",
+            // Full-tier tests (corpus) aren't timings and need `corpus fetch`.
+            &format!("test(/req_perf_/) and not {}", crate::FULL_FILTER),
         ])
         .env("BLINK_PERF_DIR", &out)
         .current_dir(root())
