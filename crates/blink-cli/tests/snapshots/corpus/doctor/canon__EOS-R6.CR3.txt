@@ -1,0 +1,28 @@
+file: EOS-R6.CR3
+size: 5273174 bytes
+kind: RAW
+container: ISO BMFF
+camera: Canon EOS R6
+raw decoder: rawler 0.8.0: ok (Canon EOS R6, sensor 3408 × 2272)
+sensor: 3408 × 2272
+embedded images: 3
+  #0 JPEG 160 × 120 at offset 18288, 16005 bytes
+  #1 JPEG 1620 × 1080 at offset 102176, 389450 bytes
+  #2 JPEG 3408 × 2272 at offset 492032, 962675 bytes  <- chosen
+chosen preview: JPEG 3408 × 2272
+low-res: no (preview long edge 3408 >= 50% of sensor long edge 3408)
+badge: EMBEDDED
+preview decode: ok 3408 × 2272, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: EOS-R6.CR3
+  Body: Canon EOS R6
+  Lens: RF70-200mm F2.8 L IS USM
+  Focal length: 200 mm
+  Shutter: 1/4 s
+  Aperture: f/25
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2021-05-12 12:21:21 +02:00
+  Dimensions: 3408 × 2272
+  Preview: EMBEDDED · 3408 × 2272

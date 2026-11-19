@@ -1,0 +1,29 @@
+file: Z-6.NEF
+size: 13507425 bytes
+kind: RAW
+container: TIFF
+camera: NIKON Z 6
+raw decoder: rawler 0.8.0: ok (Nikon Z 6, sensor 4528 × 3018)
+sensor: 4528 × 3018
+embedded images: 4
+  #0 JPEG 640 × 424 at offset 76256, 137675 bytes
+  #1 RGB8 160 × 120 at offset 213952, 57600 bytes
+  #2 JPEG 1620 × 1080 at offset 1428992, 737043 bytes
+  #3 JPEG 3024 × 2016 at offset 2166272, 432488 bytes  <- chosen
+chosen preview: JPEG 3024 × 2016
+low-res: no (preview long edge 3024 >= 50% of sensor long edge 4528)
+badge: EMBEDDED
+preview decode: ok 3024 × 2016, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: Z-6.NEF
+  Body: NIKON Z 6
+  Lens: NIKKOR Z 24-70mm f/4 S
+  Focal length: 52 mm
+  Shutter: 1 s
+  Aperture: f/6.7
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2019-11-29 17:15:20 +01:00
+  Dimensions: 4528 × 3018
+  Preview: EMBEDDED · 3024 × 2016

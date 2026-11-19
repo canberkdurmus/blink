@@ -1,0 +1,2 @@
+would update sidecar of a.ARW: remove xmp:Label
+would update sidecar of a.JPG: remove xmp:Label

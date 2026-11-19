@@ -1,0 +1,28 @@
+file: K10D.PEF
+size: 9561139 bytes
+kind: RAW
+container: TIFF
+camera: PENTAX K10D
+raw decoder: rawler 0.8.0: ok (Pentax K10D, sensor 3872 × 2592)
+sensor: 3872 × 2592
+embedded images: 3
+  #0 JPEG 640 × 480 at offset 32520, 29183 bytes
+  #1 JPEG 160 × 120 at offset 78752, 6717 bytes
+  #2 JPEG 3872 × 2592 at offset 8212260, 1348879 bytes  <- chosen
+chosen preview: JPEG 3872 × 2592
+low-res: no (preview long edge 3872 >= 50% of sensor long edge 3872)
+badge: EMBEDDED
+preview decode: ok 3872 × 2592, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: K10D.PEF
+  Body: PENTAX K10D
+  Lens: —
+  Focal length: 70 mm
+  Shutter: 1/250 s
+  Aperture: f/5
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2014-08-13 13:01:27
+  Dimensions: 3872 × 2592
+  Preview: EMBEDDED · 3872 × 2592

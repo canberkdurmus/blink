@@ -1,0 +1,28 @@
+file: DMC-LX7.RW2
+size: 11942400 bytes
+kind: RAW
+container: TIFF (Panasonic RW2)
+camera: Panasonic DMC-LX7
+raw decoder: rawler 0.8.0: ok (Panasonic DMC-LX7, sensor 3776 × 2520)
+sensor: 3776 × 2520
+embedded images: 3
+  #0 JPEG 1920 × 1280 at offset 1536, 569876 bytes  <- chosen
+  #1 JPEG 160 × 120 at offset 13312, 7159 bytes
+  #2 JPEG 1920 × 1280 at offset 33792, 537620 bytes
+chosen preview: JPEG 1920 × 1280
+low-res: no (preview long edge 1920 >= 50% of sensor long edge 3776)
+badge: EMBEDDED
+preview decode: ok 1920 × 1280, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: DMC-LX7.RW2
+  Body: Panasonic DMC-LX7
+  Lens: —
+  Focal length: 4.7 mm
+  Shutter: 1/1600 s
+  Aperture: f/2.8
+  ISO: 100
+  Exposure comp.: 0 EV
+  Captured: 2017-10-03 14:22:27
+  Dimensions: 3776 × 2520
+  Preview: EMBEDDED · 1920 × 1280

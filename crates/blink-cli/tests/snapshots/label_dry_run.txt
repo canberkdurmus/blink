@@ -1,0 +1,2 @@
+would update sidecar of b.NEF: set xmp:Label=Blue
+would update sidecar of b.HEIC: set xmp:Label=Blue

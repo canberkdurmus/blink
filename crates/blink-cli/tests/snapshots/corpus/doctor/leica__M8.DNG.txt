@@ -1,0 +1,26 @@
+file: M8.DNG
+size: 10575296 bytes
+kind: DNG
+container: TIFF
+camera: Leica Camera AG M8 Digital Camera
+raw decoder: rawler 0.8.0: ok (Leica M8, sensor 3916 × 2634)
+sensor: 3916 × 2634
+embedded images: 1
+  #0 RGB8 320 × 240 at offset 3936, 230400 bytes  <- chosen
+chosen preview: RGB8 320 × 240
+low-res: yes (preview long edge 320 < 50% of sensor long edge 3916)
+badge: EMBEDDED · LOW-RES
+preview decode: ok 320 × 240, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: M8.DNG
+  Body: Leica Camera AG M8 Digital Camera
+  Lens: —
+  Focal length: 35 mm
+  Shutter: 1/250 s
+  Aperture: —
+  ISO: 160
+  Exposure comp.: 0 EV
+  Captured: 2018-07-08 10:30:28
+  Dimensions: 3916 × 2634
+  Preview: EMBEDDED · LOW-RES · 320 × 240

@@ -14,3 +14,8 @@ workspace = true
 [dependencies]
 blink-core.workspace = true
 blink-runtime.workspace = true
+blink-decode = { path = "../blink-decode" }
+
+[dev-dependencies]
+blink-testkit = { path = "../blink-testkit" }
+toml = "1"

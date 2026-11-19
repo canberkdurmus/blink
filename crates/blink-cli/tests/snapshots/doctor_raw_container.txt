@@ -1,0 +1,26 @@
+file: a.ARW
+size: 827 bytes
+kind: RAW
+container: TIFF
+camera: unknown
+raw decoder: rawler 0.8.0: FAILED: raw: Error: No decoder found, model '', make: '', mode: ''
+sensor: unknown
+embedded images: 1
+  #0 JPEG 64 × 32 at offset 63, 764 bytes  <- chosen
+chosen preview: JPEG 64 × 32
+low-res: unknown (no preview or sensor size)
+badge: EMBEDDED
+preview decode: ok 64 × 32, from sRGB, orientation 1 (<t> ms)
+timing: read <t> ms, analyze <t> ms
+info:
+  File: a.ARW
+  Body: —
+  Lens: —
+  Focal length: —
+  Shutter: —
+  Aperture: —
+  ISO: —
+  Exposure comp.: —
+  Captured: —
+  Dimensions: —
+  Preview: EMBEDDED · 64 × 32

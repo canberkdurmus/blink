@@ -1,0 +1,5 @@
+a.ARW	RAW	+JPG	4	Red
+b.NEF	RAW	+HEIC	rejected	-
+c.JPG	JPEG	-	-	-
+d.DNG	DNG	-	5	Green
+sub/e.ARW	RAW	-	2	Purple
