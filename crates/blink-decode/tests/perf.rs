@@ -1,6 +1,7 @@
-//! PERF-4: embedded preview extract + decode, per file, on one thread (SPEC §7).
+//! PERF-4: embedded preview extract + decode, per file (SPEC §7). The file is handled by one
+//! worker; the decode of a large baseline JPEG fans out over the CPU's cores (ADR 0011).
 //!
-//! The test checks the work is done correctly and records the median of 5 runs to
+//! The test checks the work is done correctly and records the median of 11 runs to
 //! `$BLINK_PERF_DIR/PERF-4.json` (default `target/perf/`). `cargo xtask bench` runs it in release
 //! mode and compares the median with `perf/baseline-<target>.json` (> 10 % slower fails) and
 //! reports it against the absolute budget.
@@ -16,10 +17,12 @@ fn req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg() {
     let big = perf_jpeg_6mb();
     assert!((5_500_000..6_500_000).contains(&big.len()), "{}", big.len());
     let thumb = blink_testkit::fixtures::jpeg(&[128; 160 * 120 * 3], 160, 120, 80, None);
-    let file = tiff_with_jpegs(&[thumb, big]);
+    let file = tiff_with_jpegs(&[thumb, big.clone()]);
+    // The timed path is the parallel decoder, not the zune-jpeg fallback.
+    assert!(image::decode_jpeg_parallel(&big, 2).is_some());
 
     let mut runs = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..11 {
         let t = Instant::now();
         let found = embedded::find(&file);
         let chosen = embedded::largest(&found).expect("preview found");
@@ -39,7 +42,7 @@ fn req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg() {
         });
     std::fs::create_dir_all(&dir).unwrap();
     let json = format!(
-        "{{\"id\":\"PERF-4\",\"metric\":\"embedded preview extract + decode, 6 MB JPEG, median of 5\",\"median_ms\":{median:.3},\"budget_ms\":{BUDGET_MS},\"runs_ms\":{runs:?},\"optimized\":{}}}\n",
+        "{{\"id\":\"PERF-4\",\"metric\":\"embedded preview extract + decode, 6 MB JPEG, median of 11\",\"median_ms\":{median:.3},\"budget_ms\":{BUDGET_MS},\"runs_ms\":{runs:?},\"optimized\":{}}}\n",
         !cfg!(debug_assertions)
     );
     std::fs::write(dir.join("PERF-4.json"), json).unwrap();

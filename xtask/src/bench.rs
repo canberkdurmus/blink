@@ -115,6 +115,9 @@ pub fn run(allow_missing_baseline: bool) -> Result {
             "--workspace",
             "--locked",
             "--no-fail-fast",
+            // One test at a time: timings must not compete with other tests for cores.
+            "--test-threads",
+            "1",
             "-E",
             "test(/req_perf_/)",
         ])

@@ -137,4 +137,62 @@ mod full_corpus {
             exif_matches(&e, &a.exif);
         }
     }
+
+    /// PERF-4 (ADR 0011): the parallel decoder agrees with zune-jpeg on every real preview it
+    /// accepts, and its output doesn't depend on the thread count.
+    #[test]
+    fn req_perf_4_parallel_decoder_matches_zune_on_corpus_previews() {
+        use blink_decode::image::{decode_jpeg_parallel, decode_jpeg_zune};
+        let (mut handled, mut jpegs) = (Vec::new(), 0);
+        for e in manifest().files {
+            let bytes = e.bytes();
+            let a = analyze(&bytes, kind(&e), &default_backend());
+            let Some(jpeg) = a.chosen.and_then(|c| c.bytes(&bytes).map(<[u8]>::to_vec)) else {
+                continue;
+            };
+            if !jpeg.starts_with(&[0xFF, 0xD8]) {
+                continue; // e.g. Leica M8's uncompressed preview
+            }
+            jpegs += 1;
+            let one = decode_jpeg_parallel(&jpeg, 1)
+                .unwrap_or_else(|| panic!("{}: left to zune-jpeg", e.path));
+            let many = decode_jpeg_parallel(&jpeg, 8).expect("accepted with 1 thread");
+            assert!(
+                one.image == many.image,
+                "{}: 8 threads differ from 1",
+                e.path
+            );
+            let z = decode_jpeg_zune(&jpeg).expect("zune decodes").image;
+            assert_eq!((one.image.width, one.image.height), (z.width, z.height));
+            let (mut max, mut sum) = (0u32, 0u64);
+            for (x, y) in one.image.data.iter().zip(&z.data) {
+                let d = (*x as i32 - *y as i32).unsigned_abs();
+                max = max.max(d);
+                sum += u64::from(d);
+            }
+            let mean = sum as f64 / z.data.len() as f64;
+            assert!(
+                max <= 8 && mean < 0.5,
+                "{}: max {max}, mean {mean:.3}",
+                e.path
+            );
+            assert_eq!(
+                one.exif,
+                decode_jpeg_zune(&jpeg).unwrap().exif,
+                "{}",
+                e.path
+            );
+            handled.push(e.path.clone());
+        }
+        eprintln!(
+            "parallel decoder handled {} previews: {handled:?}",
+            handled.len()
+        );
+        assert_eq!(
+            handled.len(),
+            jpegs,
+            "every JPEG preview is decoded in parallel"
+        );
+        assert!(jpegs >= 11);
+    }
 }
