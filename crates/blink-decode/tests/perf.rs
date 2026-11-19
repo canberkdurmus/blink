@@ -1,7 +1,7 @@
 //! PERF-4: embedded preview extract + decode, per file (SPEC §7). The file is handled by one
 //! worker; the decode of a large baseline JPEG fans out over the CPU's cores (ADR 0011).
 //!
-//! The test checks the work is done correctly and records the median of 11 runs to
+//! The test checks the work is done correctly and records the median of 5 runs to
 //! `$BLINK_PERF_DIR/PERF-4.json` (default `target/perf/`). `cargo xtask bench` runs it in release
 //! mode and compares the median with `perf/baseline-<target>.json` (> 10 % slower fails) and
 //! reports it against the absolute budget.
@@ -22,7 +22,7 @@ fn req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg() {
     assert!(image::decode_jpeg_parallel(&big, 2).is_some());
 
     let mut runs = Vec::new();
-    for _ in 0..11 {
+    for _ in 0..5 {
         let t = Instant::now();
         let found = embedded::find(&file);
         let chosen = embedded::largest(&found).expect("preview found");
@@ -42,7 +42,7 @@ fn req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg() {
         });
     std::fs::create_dir_all(&dir).unwrap();
     let json = format!(
-        "{{\"id\":\"PERF-4\",\"metric\":\"embedded preview extract + decode, 6 MB JPEG, median of 11\",\"median_ms\":{median:.3},\"budget_ms\":{BUDGET_MS},\"runs_ms\":{runs:?},\"optimized\":{}}}\n",
+        "{{\"id\":\"PERF-4\",\"metric\":\"embedded preview extract + decode, 6 MB JPEG, median of 5\",\"median_ms\":{median:.3},\"budget_ms\":{BUDGET_MS},\"runs_ms\":{runs:?},\"optimized\":{}}}\n",
         !cfg!(debug_assertions)
     );
     std::fs::write(dir.join("PERF-4.json"), json).unwrap();

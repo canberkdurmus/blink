@@ -572,8 +572,9 @@ fn par_map<T: Send, R: Send>(
         }
     };
     let ok = std::thread::scope(|sc| {
+        // A thread the OS refuses to create is simply skipped: the calling thread drains the queue.
         let hs: Vec<_> = (1..workers.clamp(1, n.max(1)))
-            .map(|_| sc.spawn(work))
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(sc, work).ok())
             .collect();
         let main = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_ok();
         hs.into_iter().all(|h| h.join().is_ok()) && main

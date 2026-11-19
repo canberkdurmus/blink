@@ -51,9 +51,8 @@ no restart markers, so splitting at RST markers can't help.
    `pjpeg` is safe Rust: disjoint output bands come from `split_at_mut`, threads from
    `std::thread::scope`. On aarch64 NEON is baseline and the plain path vectorises.
 5. **No new dependency.** The decoder uses std and `memchr` (already a dependency).
-6. **Bench methodology.** The PERF-4 test now takes the median of 11 runs (was 5), and
-   `cargo xtask bench` runs perf tests one at a time (`--test-threads 1`), so the timed test
-   doesn't share cores with other tests.
+6. **Bench methodology.** `cargo xtask bench` runs perf tests one at a time (`--test-threads 1`),
+   so the timed test doesn't share cores with other tests. The median stays over 5 runs (SPEC §7).
 
 ## Measurements (Ryzen 7 PRO 7840U, release, shared desktop session)
 
@@ -65,7 +64,7 @@ no restart markers, so splitting at RST markers can't help.
 | Bands (decode, IDCT, upsample, colour) | ~10–11 ms |
 | Edge rows, join | ~0.5 ms |
 
-`cargo xtask bench` PERF-4 medians: **20.0, 20.7, 20.4 ms** (budget 25 ms; zune-jpeg: ~76 ms).
+`cargo xtask bench` PERF-4 medians: **20.1, 20.3, 20.2 ms** (budget 25 ms; zune-jpeg: ~76 ms).
 
 Corpus previews, `decode_jpeg` median of 11 (zune-jpeg → parallel):
 
@@ -79,6 +78,11 @@ Corpus previews, `decode_jpeg` median of 11 (zune-jpeg → parallel):
 | Nikon Z 6 | 3024×2016, 0.4 MB | 9.1 ms | 3.2 ms |
 
 The 50 MP Sony preview is bounded by writing its 150 MB RGB output.
+
+**Power state matters.** The numbers above are on AC power. On battery (amd-pstate EPP
+`balance_power`) the same laptop caps all-core clocks while single-core turbo barely changes:
+the PERF-4 decode then takes **~35–41 ms** (zune-jpeg: ~73 ms). PERF-4 is assessed on AC; the
+battery figure is flagged in the M1 gate report for the owner.
 Single-threaded the same code takes ~95 ms, so on a 4-core machine expect roughly 30–35 ms; the
 CI Linux baseline is re-recorded from CI after this change.
 
