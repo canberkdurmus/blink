@@ -7,26 +7,8 @@ milestones to have a tagged, passing test.
 
 ## Next up
 
-M1: every ID except **PERF-4** is ticked and green (full tier 82/82). PERF-4 is in `BLOCKED.md`.
-Dedicated attempt 1 is in progress: a parallel baseline-JPEG decoder (speculative chunk sync).
-The prototype lives outside the repo, so it's described here:
-
-- Entropy decode in parallel with sync at block starts. Bit-exact vs sequential; 45 ms → 5 ms on
-  16 threads for the 6 MB bench file.
-- islow IDCT + triangle upsampling: vs zune-jpeg, mean |Δ| 0.08, max 5.
-- End to end ~50 ms, because it materialises ~180 MB of fresh memory (fresh 72 MB alone costs
-  7–9 ms on the 7840U).
-- Next step: don't store coefficients. Phase 1 parses only and tracks DC sums and block-start
-  records; phase 2 syncs; phase 3 re-decodes each chunk's valid range straight into
-  IDCT → planes; then colour by row bands.
-- Integrate as `blink-decode/src/pjpeg.rs`, with zune-jpeg as fallback for progressive, DRI,
-  unsupported sampling and errors.
-- Needs: an ADR on in-file multithreading for PERF-4 (and `unsafe` if disjoint plane writes need
-  it), and tests vs zune on the corpus and synthetic files.
-- If the end-to-end median stays > 25 ms after attempt 2, escalate per CLAUDE.md.
-
-Then run the M1 gate: `cargo xtask verify --full`, `cargo xtask bench`, `cargo xtask report M1`
-(flag ADR 0010's headless split and PERF-4's numbers), tag `v0.1.0-m1`, move to M2.
+M1 gate in progress: PERF-4 closed (#10), full tier 87/87. Remaining: `cargo xtask report M1`, tag
+`v0.1.0-m1`, then M2 starting with **VIEW-1** (GUI entry points per ADR 0010).
 
 ## M0 Foundations (infrastructure)
 
@@ -53,7 +35,7 @@ Then run the M1 gate: `cargo xtask verify --full`, `cargo xtask bench`, `cargo x
 - [x] CLI-1 — `req_cli_1_export_golden`, `req_cli_1_filter_expressions`, `req_cli_1_list_and_filter_golden`, `req_cli_1_list_on_the_corpus_golden`, `req_cli_1_rate_and_label_plan_writes_for_every_pair_member_without_writing`, `req_cli_1_scan_golden` (#9) · `rate`/`label` are `--dry-run` until M3 (ADR 0010)
 - [x] CLI-2 — `req_cli_2_doctor_golden_for_synthetic_files`, `req_cli_2_doctor_on_every_corpus_file_matches_manifest_and_golden` (#9)
 - [x] PLAT-2 — `req_plat_2_portable_marker_puts_config_and_cache_next_to_binary`, `req_plat_2_without_marker_uses_platform_standard_dirs`, `req_plat_2_marker_must_be_a_file_next_to_the_binary` (#5)
-- [ ] PERF-4
+- [x] PERF-4 — `req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg`, `req_perf_4_matches_zune_jpeg_within_rounding`, `req_perf_4_output_is_identical_for_any_thread_and_chunk_count`, `req_perf_4_unhandled_layouts_are_left_to_zune_jpeg`, `req_perf_4_corrupt_or_truncated_data_never_panics`, `req_perf_4_parallel_decoder_matches_zune_on_corpus_previews` (#10) · parallel in-file decode (ADR 0011)
 
 ## M2 Loupe and speed
 
