@@ -173,10 +173,63 @@ pub fn tiff_with_jpegs(jpegs: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Deterministic photo-like 6000×4000 RGB image (gradients plus fine texture) that encodes to
-/// roughly 6 MB at quality 90 with 4:2:0 subsampling — the PERF-4 reference JPEG.
-pub fn perf_jpeg_6mb() -> Vec<u8> {
-    let (w, h) = (6000u32, 4000u32);
+/// JPEG encoding options for decoder tests.
+#[derive(Clone, Copy, Debug)]
+pub struct JpegOpts {
+    pub quality: u8,
+    /// Luma sampling factors (h, v) with 1×1 chroma: (1,1) 4:4:4, (2,1) 4:2:2, (2,2) 4:2:0,
+    /// (1,2) 4:4:0, (4,1) 4:1:1. Ignored for grayscale.
+    pub sampling: (u8, u8),
+    pub gray: bool,
+    pub progressive: bool,
+    pub restart_interval: u16,
+}
+
+impl Default for JpegOpts {
+    fn default() -> Self {
+        JpegOpts {
+            quality: 90,
+            sampling: (2, 2),
+            gray: false,
+            progressive: false,
+            restart_interval: 0,
+        }
+    }
+}
+
+/// Encode an RGB image (converted to luma when `opts.gray`) with the given options.
+pub fn jpeg_with(rgb: &[u8], w: u32, h: u32, opts: JpegOpts) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = Encoder::new(&mut out, opts.quality);
+    enc.set_sampling_factor(match opts.sampling {
+        (1, 1) => SamplingFactor::R_4_4_4,
+        (2, 1) => SamplingFactor::R_4_2_2,
+        (1, 2) => SamplingFactor::R_4_4_0,
+        (4, 1) => SamplingFactor::R_4_1_1,
+        _ => SamplingFactor::R_4_2_0,
+    });
+    enc.set_progressive(opts.progressive);
+    if opts.restart_interval > 0 {
+        enc.set_restart_interval(opts.restart_interval);
+    }
+    if opts.gray {
+        let luma: Vec<u8> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
+            .collect();
+        enc.encode(&luma, w as u16, h as u16, ColorType::Luma)
+    } else {
+        enc.encode(rgb, w as u16, h as u16, ColorType::Rgb)
+    }
+    .expect("encode jpeg");
+    out
+}
+
+/// Deterministic photo-like RGB pixels: gradients plus fine texture (compresses like a
+/// detailed photo, ~2 bits per pixel at quality 90).
+pub fn photo_rgb(w: u32, h: u32) -> Vec<u8> {
     let mut px = Vec::with_capacity((w * h * 3) as usize);
     let mut seed = 0x1234_5678u32;
     for y in 0..h {
@@ -189,6 +242,14 @@ pub fn perf_jpeg_6mb() -> Vec<u8> {
             px.extend_from_slice(&[r, g, b.wrapping_add(n)]);
         }
     }
+    px
+}
+
+/// Deterministic photo-like 6000×4000 RGB image (gradients plus fine texture) that encodes to
+/// roughly 6 MB at quality 90 with 4:2:0 subsampling — the PERF-4 reference JPEG.
+pub fn perf_jpeg_6mb() -> Vec<u8> {
+    let (w, h) = (6000u32, 4000u32);
+    let px = photo_rgb(w, h);
     let mut out = Vec::new();
     let mut enc = Encoder::new(&mut out, 90);
     enc.set_sampling_factor(SamplingFactor::R_4_2_0);

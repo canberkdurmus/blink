@@ -1,4 +1,5 @@
-//! PERF-4: embedded preview extract + decode, per file, on one thread (SPEC §7).
+//! PERF-4: embedded preview extract + decode, per file (SPEC §7). The file is handled by one
+//! worker; the decode of a large baseline JPEG fans out over the CPU's cores (ADR 0011).
 //!
 //! The test checks the work is done correctly and records the median of 5 runs to
 //! `$BLINK_PERF_DIR/PERF-4.json` (default `target/perf/`). `cargo xtask bench` runs it in release
@@ -16,7 +17,9 @@ fn req_perf_4_embedded_preview_extract_and_decode_6mb_jpeg() {
     let big = perf_jpeg_6mb();
     assert!((5_500_000..6_500_000).contains(&big.len()), "{}", big.len());
     let thumb = blink_testkit::fixtures::jpeg(&[128; 160 * 120 * 3], 160, 120, 80, None);
-    let file = tiff_with_jpegs(&[thumb, big]);
+    let file = tiff_with_jpegs(&[thumb, big.clone()]);
+    // The timed path is the parallel decoder, not the zune-jpeg fallback.
+    assert!(image::decode_jpeg_parallel(&big, 2).is_some());
 
     let mut runs = Vec::new();
     for _ in 0..5 {

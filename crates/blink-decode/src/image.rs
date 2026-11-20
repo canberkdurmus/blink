@@ -45,8 +45,44 @@ pub struct DecodedJpeg {
     pub icc: Option<Vec<u8>>,
 }
 
-/// Decode a JPEG to 8-bit RGB.
+/// JPEGs at least this large use the parallel decoder (PERF-4); smaller ones gain nothing.
+const PARALLEL_MIN_BYTES: usize = 128 * 1024;
+
+/// Decode a JPEG to 8-bit RGB. Large baseline JPEGs are decoded on several threads
+/// (`pjpeg`, ADR 0011); everything else, and anything `pjpeg` rejects, goes through zune-jpeg.
 pub fn decode_jpeg(bytes: &[u8]) -> Result<DecodedJpeg, DecodeError> {
+    if bytes.len() >= PARALLEL_MIN_BYTES {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if let Some(d) = decode_jpeg_parallel(bytes, threads) {
+            return Ok(d);
+        }
+    }
+    decode_jpeg_zune(bytes)
+}
+
+/// Parallel decode on `threads` threads; `None` when the file needs zune-jpeg.
+/// EXIF and ICC come from zune-jpeg's header parse.
+pub fn decode_jpeg_parallel(bytes: &[u8], threads: usize) -> Option<DecodedJpeg> {
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+    let opts = DecoderOptions::default()
+        .set_max_width(1 << 16)
+        .set_max_height(1 << 16)
+        .set_strict_mode(false);
+    let mut d = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
+    d.decode_headers().ok()?;
+    let (w, h, rgb) = crate::pjpeg::decode(bytes, threads)?;
+    let image = RgbImage::new(u32::try_from(w).ok()?, u32::try_from(h).ok()?, rgb)?;
+    Some(DecodedJpeg {
+        image,
+        exif: d.exif().cloned(),
+        icc: d.icc_profile(),
+    })
+}
+
+/// Decode a JPEG to 8-bit RGB with zune-jpeg (one thread).
+pub fn decode_jpeg_zune(bytes: &[u8]) -> Result<DecodedJpeg, DecodeError> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;

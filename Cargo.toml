@@ -41,3 +41,5 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.zune-core]
 opt-level = 3
+[profile.dev.package.blink-decode]
+opt-level = 3

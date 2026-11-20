@@ -6,6 +6,7 @@ pub mod color;
 pub mod embedded;
 pub mod exif;
 pub mod image;
+mod pjpeg;
 pub mod raw;
 pub mod tiff;
 
