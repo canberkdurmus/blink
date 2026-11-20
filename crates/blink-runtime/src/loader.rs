@@ -129,13 +129,17 @@ struct Shared<T> {
     /// Primary path of the current item (pinned in the cache, never cancelled).
     current: Mutex<Option<PathBuf>>,
     results: Mutex<Sender<Action>>,
-    /// Paths with a job running right now (not re-queued by a new Show).
-    running: Mutex<Vec<PathBuf>>,
 }
 
+/// Queue state. `wanted` (current + prefetch window of the latest `Show`) and `running` live
+/// under one lock: a worker decides "cancel" and leaves `running` atomically, so `show()` can
+/// never skip a path whose running job is about to be dropped.
 #[derive(Default)]
 struct Queue {
     jobs: VecDeque<Job>,
+    wanted: std::collections::HashSet<PathBuf>,
+    /// Paths with a job running right now (not re-queued by a new Show).
+    running: Vec<PathBuf>,
     shutdown: bool,
 }
 
@@ -185,7 +189,6 @@ impl<T: Send + Sync + 'static> Loader<T> {
             generation: AtomicU64::new(0),
             current: Mutex::new(None),
             results: Mutex::new(tx),
-            running: Mutex::new(Vec::new()),
         });
         let mut threads = Vec::new();
         for i in 0..workers.max(1) {
@@ -217,13 +220,15 @@ impl<T: Send + Sync + 'static> Loader<T> {
     pub fn show(&self, current: &ItemRef, prefetch: &[ItemRef]) -> Option<Action> {
         let g = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.shared.current) = Some(current.path.clone());
+        let mut q = lock(&self.shared.queue);
         let mut cache = lock(&self.shared.cache);
         let hit = cache.get(&(current.path.clone(), Level::Preview));
-        let running = lock(&self.shared.running).clone();
         let mut jobs = VecDeque::new();
+        q.wanted.clear();
         for item in std::iter::once(current).chain(prefetch) {
+            q.wanted.insert(item.path.clone());
             let cached = cache.get(&(item.path.clone(), Level::Preview)).is_some();
-            if !cached && !running.contains(&item.path) {
+            if !cached && !q.running.contains(&item.path) {
                 jobs.push_back(Job {
                     item: item.clone(),
                     generation: g,
@@ -231,7 +236,6 @@ impl<T: Send + Sync + 'static> Loader<T> {
             }
         }
         drop(cache);
-        let mut q = lock(&self.shared.queue);
         q.jobs = jobs; // stale jobs are cancelled
         drop(q);
         self.shared.queue_cv.notify_all();
@@ -281,7 +285,8 @@ impl<T: Send + Sync + 'static> Loader<T> {
 
     /// No preview job queued or running.
     pub fn idle(&self) -> bool {
-        lock(&self.shared.queue).jobs.is_empty() && lock(&self.shared.running).is_empty()
+        let q = lock(&self.shared.queue);
+        q.jobs.is_empty() && q.running.is_empty()
     }
 
     /// Bytes held by the L2 cache.
@@ -324,39 +329,56 @@ fn worker<T>(s: &Shared<T>) {
                     return;
                 }
                 if let Some(j) = q.jobs.pop_front() {
-                    lock(&s.running).push(j.item.path.clone());
+                    q.running.push(j.item.path.clone());
                     break j;
                 }
                 q = s.queue_cv.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
         let result = load_preview(s, &job);
-        lock(&s.running).retain(|p| p != &job.item.path);
+        let leave = || lock(&s.queue).running.retain(|p| p != &job.item.path);
         match result {
             Some(Ok(l)) => {
                 let a = l.ready();
-                let pinned = lock(&s.current).clone();
-                let pinned: Vec<Key> = pinned.into_iter().map(|p| (p, Level::Full)).collect();
-                lock(&s.cache).insert(Arc::new(l), &pinned);
+                lock(&s.cache).insert(Arc::new(l), &pinned(s));
+                leave(); // after the insert: `show()` sees it cached or running, never neither
                 send(s, a);
             }
-            Some(Err(error)) => send(
-                s,
-                Action::ImageFailed {
-                    path: job.item.path.clone(),
-                    level: Level::Preview,
-                    error,
-                },
-            ),
-            None => {} // cancelled
+            Some(Err(error)) => {
+                leave();
+                send(
+                    s,
+                    Action::ImageFailed {
+                        path: job.item.path.clone(),
+                        level: Level::Preview,
+                        error,
+                    },
+                )
+            }
+            None => {} // cancelled; `cancel_if_stale` already left `running`
         }
     }
 }
 
+/// Cache keys never evicted: both levels of the current item.
+fn pinned<T>(s: &Shared<T>) -> Vec<Key> {
+    lock(&s.current)
+        .clone()
+        .into_iter()
+        .flat_map(|p| [(p.clone(), Level::Preview), (p, Level::Full)])
+        .collect()
+}
+
+/// Cancellation check: a job is stale when the latest `Show` no longer wants its path. A stale
+/// job leaves `running` under the same lock, atomically with the decision.
 fn is_stale<T>(s: &Shared<T>, job: &Job) -> bool {
-    // A job is stale when a newer Show didn't ask for it again and it isn't current.
-    job.generation != s.generation.load(Ordering::SeqCst)
-        && lock(&s.current).as_ref() != Some(&job.item.path)
+    let mut q = lock(&s.queue);
+    let stale =
+        job.generation != s.generation.load(Ordering::SeqCst) && !q.wanted.contains(&job.item.path);
+    if stale {
+        q.running.retain(|p| p != &job.item.path);
+    }
+    stale
 }
 
 fn finish_load<T>(
@@ -456,7 +478,7 @@ fn full_worker<T>(s: &Shared<T>) {
         match result {
             Ok(l) => {
                 let a = l.ready();
-                lock(&s.cache).insert(Arc::new(l), &[]);
+                lock(&s.cache).insert(Arc::new(l), &pinned(s));
                 send(s, a);
             }
             Err(error) => send(

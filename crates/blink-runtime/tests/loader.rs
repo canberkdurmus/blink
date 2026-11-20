@@ -236,3 +236,67 @@ fn loader_cache_evicts_least_recently_used_beyond_its_cap() {
     assert!(loader.get(Path::new("/f/d.ARW"), Level::Preview).is_some());
     assert!(loader.get(Path::new("/f/a.ARW"), Level::Preview).is_none());
 }
+
+/// An Fs whose reads of one path block until released.
+struct GateFs {
+    inner: MemFs,
+    gated: std::path::PathBuf,
+    open: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+    entered: std::sync::Mutex<bool>,
+}
+
+impl blink_runtime::fs::Fs for GateFs {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if path == self.gated {
+            *self.entered.lock().unwrap() = true;
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.cv.wait(open).unwrap();
+            }
+        }
+        self.inner.read(path)
+    }
+    fn metadata(&self, path: &Path) -> std::io::Result<blink_runtime::fs::Meta> {
+        self.inner.metadata(path)
+    }
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<blink_runtime::fs::DirEntry>> {
+        self.inner.read_dir(path)
+    }
+}
+
+#[test]
+fn req_view_1_a_running_prefetch_still_wanted_by_a_newer_show_is_not_dropped() {
+    let inner = MemFs::new();
+    for n in ["a", "b", "c"] {
+        inner.add_file(format!("/f/{n}.ARW"), low_res_raw());
+    }
+    let fs = Arc::new(GateFs {
+        inner,
+        gated: "/f/c.ARW".into(),
+        open: std::sync::Mutex::new(false),
+        cv: std::sync::Condvar::new(),
+        entered: std::sync::Mutex::new(false),
+    });
+    let loader: Loader<()> = Loader::new(fs.clone(), Arc::new(FakeRaw), 2, 1 << 30, |_| (), || {});
+    let item = |n: &str| blink_core::state::ItemRef {
+        path: format!("/f/{n}.ARW").into(),
+        kind: blink_core::formats::FileKind::Raw,
+        paired_jpeg: None,
+    };
+    loader.show(&item("a"), &[item("c")]);
+    let t = std::time::Instant::now();
+    while !*fs.entered.lock().unwrap() {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // c is mid-read; the next Show still wants it.
+    loader.show(&item("b"), &[item("c")]);
+    *fs.open.lock().unwrap() = true;
+    fs.cv.notify_all();
+    let t = std::time::Instant::now();
+    while loader.get(Path::new("/f/c.ARW"), Level::Preview).is_none() {
+        assert!(t.elapsed() < Duration::from_secs(20), "c was dropped");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

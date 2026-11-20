@@ -768,6 +768,8 @@ mod tests {
         let (zoom, center) = (s.loupe.zoom, s.loupe.center);
         assert_ne!(center, [0.5, 0.5]);
         let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        // A resize while the next item loads must not lose the position.
+        let (s, _) = reduce(&s, Action::Resize([1000.0, 500.0]));
         let (s, _) = reduce(&s, full("/f/b.ARW"));
         assert_eq!((s.loupe.zoom, s.loupe.center), (zoom, center), "same eye");
         // Kept 100 % on a LOW-RES item requests its full image right away.

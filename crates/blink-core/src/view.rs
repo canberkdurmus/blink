@@ -130,8 +130,8 @@ impl Loupe {
 
     /// Keep the image covering the viewport where it is larger, centred where it is smaller.
     pub fn clamp_center(&mut self) {
+        // Nothing shown (the next item is loading): keep the position for it (VIEW-9).
         let Some(r) = self.image_rect() else {
-            self.center = [0.5, 0.5];
             return;
         };
         for (axis, size) in [r.w, r.h].into_iter().enumerate() {
