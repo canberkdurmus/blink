@@ -1,14 +1,16 @@
 # Progress
 
-Current milestone: M1
+Current milestone: M2
 
 Ticked IDs list their tests. `cargo xtask trace` requires every ticked ID and every ID of earlier
 milestones to have a tagged, passing test.
 
 ## Next up
 
-M1 gate in progress: PERF-4 closed (#10), full tier 87/87. Remaining: `cargo xtask report M1`, tag
-`v0.1.0-m1`, then M2 starting with **VIEW-1** (GUI entry points per ADR 0010).
+M1 closed (gate report `docs/reports/M1.md`, pre-release `v1.0.0-m1`). **M2 Loupe and speed** starts
+with **VIEW-1**: GUI open entry points (drop, dialog, `blink [folder]`) from ADR 0010 plus the loupe
+in `crates/blink-app`. Then VIEW-4 (needs VIEW-2), VIEW-6, VIEW-9, and PERF-1/2/3/5 with
+`perf/scripts/*.json` bench scripts (see the `xtask/src/bench.rs` header).
 
 ## M0 Foundations (infrastructure)
 
@@ -88,3 +90,4 @@ M1 gate in progress: PERF-4 closed (#10), full tier 87/87. Remaining: `cargo xta
 
 - 2026-11-17 · M0 closed · workspace, xtask, 4 workflows green on 6 targets, .claude setup, v0.0.1-m0, ADRs 0001–0005
 - 2026-11-19 · OPEN-1, OPEN-2, OPEN-4, VIEW-2, VIEW-3, VIEW-7, VIEW-8, VIEW-10, RATE-4, CLI-1, CLI-2 closed (#6–#9) · PERF-4 blocked (serial Huffman floor ~55 ms); parallel decoder prototype under way
+- 2026-11-20 · PERF-4 closed (#10), M1 gate passed · parallel JPEG decoder (ADR 0011), bench writes results.md (#11), v1.0.0-m1
