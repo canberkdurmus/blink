@@ -1,7 +1,8 @@
 //! `cargo xtask bench`: run the perf tests (`req_perf_*`) in release mode, collect the JSON
 //! results they write to `target/perf/`, compare medians with `perf/baseline-<target>.json`
 //! (a regression of more than 10 % fails, SPEC §7) and print them against the absolute budgets.
-//! GUI bench scripts (`perf/scripts/*.json`, `blink --bench-script`) join with the M2 PERF IDs.
+//! GUI bench scripts (`perf/scripts/*.json`) run through the `req_perf_*` tests of `blink-ui`
+//! (also available as `blink --bench-script <script> <folder>`). Needs `cargo xtask corpus fetch`.
 //!
 //! Baseline format: `{ "PERF-4": { "median_ms": 75.0 }, ... }`.
 
@@ -120,8 +121,9 @@ pub fn run(allow_missing_baseline: bool) -> Result {
             "--test-threads",
             "1",
             "-E",
-            // Full-tier tests (corpus) aren't timings and need `corpus fetch`.
-            &format!("test(/req_perf_/) and not {}", crate::FULL_FILTER),
+            // Every perf test, including full-tier ones (GUI scripts; PERF-5 needs the
+            // corpus, so run `cargo xtask corpus fetch` first).
+            "test(/req_perf_/)",
         ])
         .env("BLINK_PERF_DIR", &out)
         .current_dir(root())

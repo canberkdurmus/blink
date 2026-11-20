@@ -128,7 +128,7 @@ fn req_view_1_first_item_shows_its_embedded_preview_and_neighbours_are_prefetche
     assert_eq!((shown.size, shown.full_size), ((160, 120), (400, 300)));
     let l = s.loupe_loaded("/f/a.ARW");
     assert_eq!(l.prepared, (160, 120));
-    assert_eq!(l.histogram.source, PreviewSource::EmbeddedLowRes);
+    assert_eq!(l.histogram().source, PreviewSource::EmbeddedLowRes);
     // Prefetched: moving on is answered from the cache in the same dispatch.
     let t = std::time::Instant::now();
     while !(s

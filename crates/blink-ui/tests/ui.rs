@@ -161,7 +161,7 @@ fn req_view_6_j_toggles_the_clipping_overlay_and_i_shows_the_labelled_histogram(
     h.step();
     h.get_by_label("Histogram · EMBEDDED");
     // The quadrant at 250,250,250 is not clipped; the counts come from the displayed image.
-    let hist = h.state().loaded().unwrap().histogram.clone();
+    let hist = h.state().loaded().unwrap().histogram().clone();
     assert_eq!(hist.source, PreviewSource::Embedded);
     assert_eq!(hist.red.iter().sum::<u32>(), 600 * 400);
 }

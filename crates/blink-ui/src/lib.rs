@@ -1,6 +1,7 @@
 //! Blink UI: egui views, theming and input mapping. Talks to files only through the runtime.
 
 pub mod app;
+pub mod bench;
 pub mod tiles;
 
 pub use app::{BlinkApp, Displayed, Options};

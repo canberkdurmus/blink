@@ -79,6 +79,12 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: perf
+      - name: Corpus cache
+        uses: actions/cache@v6
+        with:
+          path: corpus/cache
+          key: corpus-${{ hashFiles('corpus/manifest.toml') }}
+      - run: cargo xtask corpus fetch
       - run: cargo xtask bench
       - uses: actions/upload-artifact@v7
         if: always()

@@ -43,8 +43,8 @@ pub struct Loaded<T> {
     pub size: (u32, u32),
     /// Full-resolution size the zoom refers to (after orientation).
     pub full_size: (u32, u32),
-    /// Histogram of the displayed pixels (VIEW-6).
-    pub histogram: Histogram,
+    /// Histogram of the displayed pixels (VIEW-6), computed on first use.
+    histogram: std::sync::OnceLock<Histogram>,
     /// Info panel values for these pixels (VIEW-7).
     pub info: InfoInput,
     /// The UI's prepared form of the pixels.
@@ -54,6 +54,18 @@ pub struct Loaded<T> {
 }
 
 impl<T> Loaded<T> {
+    /// Histogram of the displayed pixels (VIEW-6). Computed on first call (all cores, a few
+    /// ms); call it off the UI thread, or check [`Self::histogram_ready`].
+    pub fn histogram(&self) -> &Histogram {
+        self.histogram
+            .get_or_init(|| histogram(&self.preview.image, self.source))
+    }
+
+    /// The histogram if it has been computed.
+    pub fn histogram_ready(&self) -> Option<&Histogram> {
+        self.histogram.get()
+    }
+
     fn bytes(&self) -> usize {
         // RGB pixels plus (typically) RGBA texture data.
         self.size.0 as usize * self.size.1 as usize * 7
@@ -333,12 +345,16 @@ fn worker<T>(s: &Shared<T>) {
                 }
                 if let Some(j) = q.jobs.pop_front() {
                     q.running.push(j.item.path.clone());
-                    break j;
+                    // Share the cores between the jobs running now: an idle loader decodes
+                    // the current item on all of them, a busy one doesn't oversubscribe.
+                    let threads = (cores() / q.running.len()).max(1);
+                    break (j, threads);
                 }
                 q = s.queue_cv.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let result = load_preview(s, &job);
+        let (job, threads) = job;
+        let result = load_preview(s, &job, threads);
         let leave = || lock(&s.queue).running.retain(|p| p != &job.item.path);
         match result {
             Some(Ok(l)) => {
@@ -393,7 +409,6 @@ fn finish_load<T>(
 ) -> Loaded<T> {
     let path = &item.path;
     let size = (preview.image.width, preview.image.height);
-    let histogram = histogram(&preview.image, preview.source);
     let info = crate::inspect::info_input(path, item.kind, &analysis, Some(&preview));
     let prepared = (s.prepare)(&preview);
     Loaded {
@@ -402,7 +417,7 @@ fn finish_load<T>(
         source: preview.source,
         size,
         full_size: full_size.unwrap_or(size),
-        histogram,
+        histogram: std::sync::OnceLock::new(),
         info,
         prepared,
         preview: Arc::new(preview),
@@ -416,7 +431,11 @@ fn read<T>(s: &Shared<T>, p: &Path) -> Result<Vec<u8>, String> {
 /// Outcome of a preview job: `None` = cancelled.
 type Outcome<T> = Option<Result<Loaded<T>, String>>;
 
-fn load_preview<T>(s: &Shared<T>, job: &Job) -> Outcome<T> {
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+fn load_preview<T>(s: &Shared<T>, job: &Job, threads: usize) -> Outcome<T> {
     if is_stale(s, job) {
         return None;
     }
@@ -433,10 +452,12 @@ fn load_preview<T>(s: &Shared<T>, job: &Job) -> Outcome<T> {
     }
     let a = blink_decode::analyze(&bytes, item.kind, s.backend.as_ref());
     let decoded = match (item.kind, &a.chosen, &item.paired_jpeg) {
-        (FileKind::Jpeg, _, _) => blink_decode::decode_jpeg_file(&bytes, PreviewSource::Jpeg)
-            .map(|p| (p, None))
-            .map_err(|e| e.to_string()),
-        (_, Some(_), _) => blink_decode::decode_embedded(&bytes, &a)
+        (FileKind::Jpeg, _, _) => {
+            blink_decode::decode_jpeg_file_threads(&bytes, PreviewSource::Jpeg, threads)
+                .map(|p| (p, None))
+                .map_err(|e| e.to_string())
+        }
+        (_, Some(_), _) => blink_decode::decode_embedded_threads(&bytes, &a, threads)
             .map(|p| {
                 let full = full_at_least_own(&p, a.full_size());
                 (p, Some(full))
@@ -444,7 +465,7 @@ fn load_preview<T>(s: &Shared<T>, job: &Job) -> Outcome<T> {
             .map_err(|e| e.to_string()),
         // No embedded preview: the paired JPEG is the display fallback (D-4).
         (_, None, Some(j)) => read(s, j).and_then(|jb| {
-            blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
+            blink_decode::decode_jpeg_file_threads(&jb, PreviewSource::PairedJpeg, threads)
                 .map(|p| {
                     let full = full_at_least_own(&p, a.full_size());
                     (p, Some(full))
@@ -500,17 +521,24 @@ fn full_worker<T>(s: &Shared<T>) {
 }
 
 fn load_full<T>(s: &Shared<T>, item: &ItemRef) -> Result<Loaded<T>, String> {
-    let bytes = read(s, &item.path)?;
-    let a: Analysis = blink_decode::analyze(&bytes, item.kind, s.backend.as_ref());
-    let preview = match (&item.paired_jpeg, item.kind) {
+    let (preview, a) = match (&item.paired_jpeg, item.kind) {
         (Some(j), _) => {
             let jb = read(s, j)?;
-            blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
-                .map_err(|e| e.to_string())?
+            let p = blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
+                .map_err(|e| e.to_string())?;
+            // Info comes from the RAW; an unreadable RAW doesn't fail the JPEG zoom.
+            let a = match read(s, &item.path) {
+                Ok(b) => blink_decode::analyze(&b, item.kind, s.backend.as_ref()),
+                Err(_) => blink_decode::analyze(&jb, FileKind::Jpeg, s.backend.as_ref()),
+            };
+            (p, a)
         }
         (None, FileKind::Raw | FileKind::Dng) => {
-            blink_decode::decode_raw(&bytes, &a, s.backend.as_ref())
-                .map_err(|e| format!("RAW decode failed: {e}"))?
+            let b = read(s, &item.path)?;
+            let a: Analysis = blink_decode::analyze(&b, item.kind, s.backend.as_ref());
+            let p = blink_decode::decode_raw(&b, &a, s.backend.as_ref())
+                .map_err(|e| format!("RAW decode failed: {e}"))?;
+            (p, a)
         }
         (None, _) => return Err("no full-resolution source".into()),
     };

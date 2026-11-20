@@ -92,8 +92,40 @@ impl Histogram {
     }
 }
 
-/// Compute the histograms of `img`, which was displayed from `source`.
+/// Compute the histograms of `img`, which was displayed from `source`, on all cores.
 pub fn histogram(img: &RgbImage, source: PreviewSource) -> Histogram {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let px = img.data.as_chunks::<3>().0;
+    let chunk = px.len().div_ceil(threads).max(1 << 16);
+    let parts: Vec<Histogram> = std::thread::scope(|s| {
+        let handles: Vec<_> = px
+            .chunks(chunk)
+            .map(|c| s.spawn(move || histogram_of(c, source)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("histogram thread"))
+            .collect()
+    });
+    let mut h = histogram_of(&[], source);
+    for p in parts {
+        for (a, b) in [
+            (&mut h.red, &p.red),
+            (&mut h.green, &p.green),
+            (&mut h.blue, &p.blue),
+            (&mut h.luma, &p.luma),
+        ] {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        }
+        h.highlights_clipped += p.highlights_clipped;
+        h.shadows_clipped += p.shadows_clipped;
+    }
+    h
+}
+
+fn histogram_of(px: &[[u8; 3]], source: PreviewSource) -> Histogram {
     let mut h = Histogram {
         source,
         red: [0; 256],
@@ -103,7 +135,7 @@ pub fn histogram(img: &RgbImage, source: PreviewSource) -> Histogram {
         highlights_clipped: 0,
         shadows_clipped: 0,
     };
-    for &px in img.data.as_chunks::<3>().0 {
+    for &px in px {
         h.red[usize::from(px[0])] += 1;
         h.green[usize::from(px[1])] += 1;
         h.blue[usize::from(px[2])] += 1;

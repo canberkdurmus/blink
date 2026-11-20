@@ -33,8 +33,31 @@ pub struct Displayed {
     pub size: (u32, u32),
 }
 
+/// A tile's place in its image, in image pixels.
+#[derive(Debug, Clone, Copy)]
+struct Geom {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl From<&Tile> for Geom {
+    fn from(t: &Tile) -> Self {
+        Self {
+            x: t.x,
+            y: t.y,
+            w: t.w,
+            h: t.h,
+        }
+    }
+}
+
+/// GPU textures of one image. Only geometry is kept next to each texture, so the CPU pixels
+/// are freed with the L2 entry (or, for overlays, once uploaded).
+#[derive(Default)]
 struct Uploaded {
-    tiles: Vec<(Tile, TextureHandle)>,
+    tiles: Vec<(Geom, TextureHandle)>,
     total: usize,
 }
 
@@ -70,8 +93,13 @@ pub struct BlinkApp {
     textures: HashMap<Key2, Uploaded>,
     /// L1 recency, most recent last.
     l1_order: VecDeque<Key2>,
+    /// Clipping overlay tiles being computed (dropped once uploaded).
     overlays: HashMap<Key2, Arc<OnceLock<Vec<Tile>>>>,
-    overlay_textures: HashMap<Key2, Vec<(Tile, TextureHandle)>>,
+    overlay_textures: HashMap<Key2, Uploaded>,
+    /// Histograms being computed off the UI thread.
+    hist_pending: std::collections::HashSet<Key2>,
+    /// The image the loupe draws this frame (chosen before the panels, so they agree).
+    drawn: Option<Arc<Loaded<Prepared>>>,
     displayed: Option<Displayed>,
     toast_at: f64,
     drag_moved: bool,
@@ -110,6 +138,8 @@ impl BlinkApp {
             l1_order: VecDeque::new(),
             overlays: HashMap::new(),
             overlay_textures: HashMap::new(),
+            hist_pending: Default::default(),
+            drawn: None,
             displayed: None,
             toast_at: 0.0,
             drag_moved: false,
@@ -130,13 +160,26 @@ impl BlinkApp {
         self.displayed.as_ref()
     }
 
-    /// The loaded image the loupe would draw for the current item, if any.
+    /// The loaded image the loupe draws (this frame's choice).
     pub fn loaded(&self) -> Option<Arc<Loaded<Prepared>>> {
-        let shown = self.state.loupe.shown.as_ref()?;
-        self.loader
-            .get(&shown.path, Level::Full)
-            .filter(|l| l.source == shown.source)
-            .or_else(|| self.loader.get(&shown.path, Level::Preview))
+        self.drawn.clone()
+    }
+
+    /// Request a real RAW decode of the current item (bench scripts, PERF-5).
+    pub fn decode_raw(&mut self) {
+        self.dispatch(Action::DecodeRaw);
+    }
+
+    /// Choose (and upload) what the loupe draws: only the current item's pixels (PERF-3).
+    fn choose_drawn(&mut self) {
+        let current = self.state.current_item().map(|i| i.primary.path.clone());
+        self.drawn = self
+            .state
+            .loupe
+            .shown
+            .clone()
+            .filter(|s| Some(&s.path) == current.as_ref())
+            .and_then(|s| self.drawable(&s.path, s.source));
     }
 
     /// No decode job is queued or running.
@@ -160,6 +203,15 @@ impl BlinkApp {
         let mut queue = VecDeque::from([action]);
         while let Some(a) = queue.pop_front() {
             let scanned = matches!(a, Action::FolderScanned { .. });
+            if matches!(a, Action::OpenFolder(_)) {
+                // Files may have changed on disk: never reuse an old texture for a path.
+                self.textures.clear();
+                self.overlay_textures.clear();
+                self.overlays.clear();
+                self.hist_pending.clear();
+                self.l1_order.clear();
+                self.drawn = None;
+            }
             let (s, fx) = reduce(&self.state, a);
             let toast_changed = s.toast != self.state.toast;
             self.state = s;
@@ -232,6 +284,7 @@ impl BlinkApp {
         self.pump();
         self.handle_keys(ui.ctx());
         self.handle_drop(ui.ctx());
+        self.choose_drawn();
         self.top_bar(ui);
         if self.state.loupe.info_panel {
             egui::Panel::right("info")
@@ -368,7 +421,7 @@ impl BlinkApp {
     }
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(l) = self.loaded() else {
+        let Some(l) = self.drawn.clone() else {
             ui.label("—");
             return;
         };
@@ -380,7 +433,20 @@ impl BlinkApp {
             }
         });
         ui.separator();
-        histogram_widget(ui, &l.histogram);
+        match l.histogram_ready() {
+            Some(h) => histogram_widget(ui, h),
+            None => {
+                ui.label(format!("Histogram · {} · computing…", l.source.badge()));
+                let key = (l.path.clone(), l.level);
+                if self.hist_pending.insert(key) {
+                    let ctx = self.ctx.clone();
+                    std::thread::spawn(move || {
+                        l.histogram();
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
     }
 
     fn loupe(&mut self, ui: &mut egui::Ui) {
@@ -430,19 +496,19 @@ impl BlinkApp {
             .shown
             .clone()
             .filter(|s| Some(&s.path) == current.as_ref());
-        if let (Some(shown), Some(img_rect)) = (shown.clone(), self.state.loupe.image_rect()) {
+        if let (Some(l), Some(img_rect)) = (self.drawn.clone(), self.state.loupe.image_rect()) {
             let screen = Rect::from_min_size(
                 rect.min + Vec2::new(img_rect.x, img_rect.y) / ppp,
                 Vec2::new(img_rect.w, img_rect.h) / ppp,
             );
-            if let Some(l) = self.drawable(&shown.path, shown.source) {
+            {
                 let key = (l.path.clone(), l.level);
                 let full = (l.size.0 as f32, l.size.1 as f32);
                 if let Some(up) = self.textures.get(&key) {
                     for (t, tex) in &up.tiles {
                         painter.image(
                             tex.id(),
-                            tile_rect(screen, full, t),
+                            tile_rect(screen, full, *t),
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
@@ -560,6 +626,7 @@ impl BlinkApp {
                 self.textures.remove(&old);
                 self.overlay_textures.remove(&old);
                 self.overlays.remove(&old);
+                self.hist_pending.remove(&old);
             }
         }
         let up = self.textures.entry(key).or_insert_with(|| Uploaded {
@@ -573,7 +640,7 @@ impl BlinkApp {
                 t.image.clone(),
                 TextureOptions::LINEAR,
             );
-            up.tiles.push((t.clone(), tex));
+            up.tiles.push((Geom::from(t), tex));
         }
         up.tiles.len() == up.total
     }
@@ -598,24 +665,31 @@ impl BlinkApp {
         let Some(tiles) = cell.get() else {
             return;
         };
-        let ctx = &self.ctx;
-        let texs = self.overlay_textures.entry(key).or_insert_with(|| {
-            tiles
-                .iter()
-                .map(|t| {
-                    let tex = ctx.load_texture(
-                        format!("clip#{}x{}", t.x, t.y),
-                        t.image.clone(),
-                        TextureOptions::NEAREST,
-                    );
-                    (t.clone(), tex)
-                })
-                .collect()
-        });
-        for (t, tex) in texs.iter() {
+        // Same per-frame budget as full images, so the overlay never stalls a frame (PERF-5).
+        let up = self.overlay_textures.entry(key.clone()).or_default();
+        up.total = tiles.len();
+        for t in tiles.iter().skip(up.tiles.len()).take(FULL_TILES_PER_FRAME) {
+            let tex = self.ctx.load_texture(
+                format!("clip#{}x{}", t.x, t.y),
+                t.image.clone(),
+                TextureOptions::NEAREST,
+            );
+            up.tiles.push((Geom::from(t), tex));
+        }
+        if up.tiles.len() < up.total {
+            self.ctx.request_repaint();
+            return;
+        }
+        // Uploaded: drop the CPU copy (keep an empty cell so it isn't recomputed).
+        if !tiles.is_empty() {
+            let done = Arc::new(OnceLock::new());
+            let _ = done.set(Vec::new());
+            self.overlays.insert(key, done);
+        }
+        for (t, tex) in &up.tiles {
             painter.image(
                 tex.id(),
-                tile_rect(screen, full, t),
+                tile_rect(screen, full, *t),
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -624,7 +698,7 @@ impl BlinkApp {
 }
 
 /// Screen rectangle of tile `t` of an image of `size` pixels drawn over `screen`.
-fn tile_rect(screen: Rect, size: (f32, f32), t: &Tile) -> Rect {
+fn tile_rect(screen: Rect, size: (f32, f32), t: Geom) -> Rect {
     let sx = screen.width() / size.0;
     let sy = screen.height() / size.1;
     Rect::from_min_size(

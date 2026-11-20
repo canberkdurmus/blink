@@ -35,26 +35,37 @@ fn tile_grid(w: u32, h: u32) -> impl Iterator<Item = (u32, u32, u32, u32)> {
     })
 }
 
-/// Split an RGB image into opaque RGBA tiles.
-pub fn tiles_of(img: &RgbImage, pixel: impl Fn([u8; 3]) -> Color32) -> Vec<Tile> {
+/// Split an RGB image into RGBA tiles, one thread per tile.
+pub fn tiles_of(img: &RgbImage, pixel: impl Fn([u8; 3]) -> Color32 + Sync) -> Vec<Tile> {
     let stride = img.width as usize * 3;
-    tile_grid(img.width, img.height)
-        .map(|(x, y, w, h)| {
-            let mut px = Vec::with_capacity(w as usize * h as usize);
-            for row in y..y + h {
-                let start = row as usize * stride + x as usize * 3;
-                let line = &img.data[start..start + w as usize * 3];
-                px.extend(line.as_chunks::<3>().0.iter().map(|p| pixel(*p)));
-            }
-            Tile {
-                x,
-                y,
-                w,
-                h,
-                image: Arc::new(ColorImage::new([w as usize, h as usize], px)),
-            }
-        })
-        .collect()
+    let grid: Vec<_> = tile_grid(img.width, img.height).collect();
+    let pixel = &pixel;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = grid
+            .into_iter()
+            .map(|(x, y, w, h)| {
+                s.spawn(move || {
+                    let mut px = Vec::with_capacity(w as usize * h as usize);
+                    for row in y..y + h {
+                        let start = row as usize * stride + x as usize * 3;
+                        let line = &img.data[start..start + w as usize * 3];
+                        px.extend(line.as_chunks::<3>().0.iter().map(|p| pixel(*p)));
+                    }
+                    Tile {
+                        x,
+                        y,
+                        w,
+                        h,
+                        image: Arc::new(ColorImage::new([w as usize, h as usize], px)),
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("tile thread"))
+            .collect()
+    })
 }
 
 /// The loader's `prepare` hook: displayed pixels as tiles.
