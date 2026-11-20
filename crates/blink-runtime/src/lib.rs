@@ -4,6 +4,7 @@
 
 pub mod fs;
 pub mod inspect;
+pub mod loader;
 pub mod marks;
 pub mod paths;
 pub mod scan;

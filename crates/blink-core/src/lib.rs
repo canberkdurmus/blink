@@ -9,6 +9,7 @@ pub mod info;
 pub mod item;
 pub mod preview;
 pub mod state;
+pub mod view;
 
 /// Application name as shown to users (SPEC D-7).
 pub const APP_NAME: &str = "Blink";
