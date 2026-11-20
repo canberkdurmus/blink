@@ -18,6 +18,7 @@
 
 use crate::fs::Fs;
 use blink_core::formats::FileKind;
+use blink_core::info::InfoInput;
 use blink_core::preview::PreviewSource;
 use blink_core::state::{Action, Effect, ItemRef, Level};
 use blink_decode::raw::RawBackend;
@@ -44,6 +45,8 @@ pub struct Loaded<T> {
     pub full_size: (u32, u32),
     /// Histogram of the displayed pixels (VIEW-6).
     pub histogram: Histogram,
+    /// Info panel values for these pixels (VIEW-7).
+    pub info: InfoInput,
     /// The UI's prepared form of the pixels.
     pub prepared: T,
     /// Decoded RGB pixels, kept for the clipping overlay and tests.
@@ -383,13 +386,15 @@ fn is_stale<T>(s: &Shared<T>, job: &Job) -> bool {
 
 fn finish_load<T>(
     s: &Shared<T>,
-    path: &Path,
+    item: &ItemRef,
     level: Level,
-    preview: Preview,
+    (preview, analysis): (Preview, Analysis),
     full_size: Option<(u32, u32)>,
 ) -> Loaded<T> {
+    let path = &item.path;
     let size = (preview.image.width, preview.image.height);
     let histogram = histogram(&preview.image, preview.source);
+    let info = crate::inspect::info_input(path, item.kind, &analysis, Some(&preview));
     let prepared = (s.prepare)(&preview);
     Loaded {
         path: path.to_path_buf(),
@@ -398,56 +403,57 @@ fn finish_load<T>(
         size,
         full_size: full_size.unwrap_or(size),
         histogram,
+        info,
         prepared,
         preview: Arc::new(preview),
     }
 }
 
-fn load_preview<T>(s: &Shared<T>, job: &Job) -> Option<Result<Loaded<T>, String>> {
+fn read<T>(s: &Shared<T>, p: &Path) -> Result<Vec<u8>, String> {
+    s.fs.read(p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Outcome of a preview job: `None` = cancelled.
+type Outcome<T> = Option<Result<Loaded<T>, String>>;
+
+fn load_preview<T>(s: &Shared<T>, job: &Job) -> Outcome<T> {
     if is_stale(s, job) {
         return None;
     }
     let item = &job.item;
-    let read = |p: &Path| s.fs.read(p).map_err(|e| format!("{}: {e}", p.display()));
-    let out = match item.kind {
-        FileKind::Heif => Err("preview unavailable for HEIF in v1".to_string()),
-        FileKind::Jpeg => read(&item.path).and_then(|b| {
-            if is_stale(s, job) {
-                return Err(String::new());
-            }
-            blink_decode::decode_jpeg_file(&b, PreviewSource::Jpeg)
-                .map(|p| (p, None))
-                .map_err(|e| e.to_string())
-        }),
-        FileKind::Raw | FileKind::Dng => read(&item.path).and_then(|b| {
-            if is_stale(s, job) {
-                return Err(String::new());
-            }
-            let a = blink_decode::analyze(&b, item.kind, s.backend.as_ref());
-            match (&a.chosen, &item.paired_jpeg) {
-                (Some(_), _) => blink_decode::decode_embedded(&b, &a)
-                    .map(|p| (p, a.full_size()))
-                    .map_err(|e| e.to_string()),
-                // No embedded preview: the paired JPEG is the display fallback (D-4).
-                (None, Some(j)) => read(j).and_then(|jb| {
-                    blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
-                        .map(|p| (p, a.full_size()))
-                        .map_err(|e| e.to_string())
-                }),
-                (None, None) => Err("no embedded preview".into()),
-            }
-            .map(|(p, full)| {
-                let full = full_at_least_own(&p, full);
+    if item.kind == FileKind::Heif {
+        return Some(Err("preview unavailable for HEIF in v1".into()));
+    }
+    let bytes = match read(s, &item.path) {
+        Ok(b) => b,
+        Err(e) => return Some(Err(e)),
+    };
+    if is_stale(s, job) {
+        return None;
+    }
+    let a = blink_decode::analyze(&bytes, item.kind, s.backend.as_ref());
+    let decoded = match (item.kind, &a.chosen, &item.paired_jpeg) {
+        (FileKind::Jpeg, _, _) => blink_decode::decode_jpeg_file(&bytes, PreviewSource::Jpeg)
+            .map(|p| (p, None))
+            .map_err(|e| e.to_string()),
+        (_, Some(_), _) => blink_decode::decode_embedded(&bytes, &a)
+            .map(|p| {
+                let full = full_at_least_own(&p, a.full_size());
                 (p, Some(full))
             })
+            .map_err(|e| e.to_string()),
+        // No embedded preview: the paired JPEG is the display fallback (D-4).
+        (_, None, Some(j)) => read(s, j).and_then(|jb| {
+            blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
+                .map(|p| {
+                    let full = full_at_least_own(&p, a.full_size());
+                    (p, Some(full))
+                })
+                .map_err(|e| e.to_string())
         }),
+        (_, None, None) => Err("no embedded preview".into()),
     };
-    let out = match out {
-        Ok((p, full)) => Ok(finish_load(s, &item.path, Level::Preview, p, full)),
-        Err(e) if e.is_empty() => return None,
-        Err(e) => Err(e),
-    };
-    Some(out)
+    Some(decoded.map(|(p, full)| finish_load(s, item, Level::Preview, (p, a), full)))
 }
 
 /// The full size is at least the preview's own size (unknown sensor, or a preview larger than
@@ -494,22 +500,19 @@ fn full_worker<T>(s: &Shared<T>) {
 }
 
 fn load_full<T>(s: &Shared<T>, item: &ItemRef) -> Result<Loaded<T>, String> {
-    let read = |p: &Path| s.fs.read(p).map_err(|e| format!("{}: {e}", p.display()));
-    let (preview, full): (Preview, Option<(u32, u32)>) = match (&item.paired_jpeg, item.kind) {
+    let bytes = read(s, &item.path)?;
+    let a: Analysis = blink_decode::analyze(&bytes, item.kind, s.backend.as_ref());
+    let preview = match (&item.paired_jpeg, item.kind) {
         (Some(j), _) => {
-            let b = read(j)?;
-            let p = blink_decode::decode_jpeg_file(&b, PreviewSource::PairedJpeg)
-                .map_err(|e| e.to_string())?;
-            (p, None)
+            let jb = read(s, j)?;
+            blink_decode::decode_jpeg_file(&jb, PreviewSource::PairedJpeg)
+                .map_err(|e| e.to_string())?
         }
         (None, FileKind::Raw | FileKind::Dng) => {
-            let b = read(&item.path)?;
-            let a: Analysis = blink_decode::analyze(&b, item.kind, s.backend.as_ref());
-            let p = blink_decode::decode_raw(&b, &a, s.backend.as_ref())
-                .map_err(|e| format!("RAW decode failed: {e}"))?;
-            (p, None)
+            blink_decode::decode_raw(&bytes, &a, s.backend.as_ref())
+                .map_err(|e| format!("RAW decode failed: {e}"))?
         }
         (None, _) => return Err("no full-resolution source".into()),
     };
-    Ok(finish_load(s, &item.path, Level::Full, preview, full))
+    Ok(finish_load(s, item, Level::Full, (preview, a), None))
 }

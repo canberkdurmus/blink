@@ -97,34 +97,44 @@ impl Inspection {
 
     /// Info panel values (VIEW-7).
     pub fn info(&self) -> InfoInput {
-        let e = &self.analysis.exif;
-        let preview_size = match &self.preview {
-            Some(Ok(p)) => Some((p.image.width, p.image.height)),
+        let preview = match &self.preview {
+            Some(Ok(p)) => Some(p),
             _ => None,
         };
-        let dimensions = match self.kind {
-            FileKind::Jpeg => preview_size,
-            _ => self.analysis.sensor,
-        };
-        InfoInput {
-            file_name: self
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            make: e.make.clone(),
-            model: e.model.clone(),
-            lens: e.lens.clone(),
-            focal_length_mm: e.focal_length,
-            exposure_time_s: e.exposure_time,
-            f_number: e.f_number,
-            iso: e.iso,
-            exposure_compensation_ev: e.exposure_compensation,
-            date_time_original: e.date_time_original.clone(),
-            offset_time_original: e.offset_time_original.clone(),
-            dimensions,
-            preview_source: Some(self.source()),
-            preview_size,
-        }
+        info_input(&self.path, self.kind, &self.analysis, preview)
+    }
+}
+
+/// Info panel values (VIEW-7) of a file, for the displayed `preview` (if any).
+pub fn info_input(
+    path: &Path,
+    kind: FileKind,
+    analysis: &Analysis,
+    preview: Option<&Preview>,
+) -> InfoInput {
+    let e = &analysis.exif;
+    let preview_size = preview.map(|p| (p.image.width, p.image.height));
+    let dimensions = match kind {
+        FileKind::Jpeg => preview_size,
+        _ => analysis.sensor,
+    };
+    InfoInput {
+        file_name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        make: e.make.clone(),
+        model: e.model.clone(),
+        lens: e.lens.clone(),
+        focal_length_mm: e.focal_length,
+        exposure_time_s: e.exposure_time,
+        f_number: e.f_number,
+        iso: e.iso,
+        exposure_compensation_ev: e.exposure_compensation,
+        date_time_original: e.date_time_original.clone(),
+        offset_time_original: e.offset_time_original.clone(),
+        dimensions,
+        preview_source: Some(preview.map_or(PreviewSource::Unavailable, |p| p.source)),
+        preview_size,
     }
 }
