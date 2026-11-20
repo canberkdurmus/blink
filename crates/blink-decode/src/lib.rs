@@ -144,8 +144,11 @@ fn finish(
     source: PreviewSource,
 ) -> Result<Preview, DecodeError> {
     color::to_srgb(&mut image, &space).map_err(DecodeError)?;
+    if (2..=8).contains(&orientation) {
+        image = image::orient(&image, orientation);
+    }
     Ok(Preview {
-        image: image::orient(&image, orientation),
+        image,
         source,
         space,
         orientation,
@@ -187,5 +190,34 @@ pub fn decode_embedded(file: &[u8], a: &Analysis) -> Result<Preview, DecodeError
                 .ok_or_else(|| DecodeError("bad RGB preview size".into()))?;
             finish(img, space_of(None, None, &a.exif), orientation, source)
         }
+    }
+}
+
+/// Decode the RAW sensor data for full-resolution display (VIEW-4): developed to sRGB at the
+/// sensor's crop size, then oriented by the container's EXIF orientation.
+pub fn decode_raw(
+    file: &[u8],
+    a: &Analysis,
+    backend: &dyn RawBackend,
+) -> Result<Preview, DecodeError> {
+    let img = backend.develop(file)?;
+    finish(
+        img,
+        SourceSpace::Srgb,
+        a.exif.orientation.unwrap_or(1),
+        PreviewSource::RawDecode,
+    )
+}
+
+impl Analysis {
+    /// Size of the full-resolution image after orientation: the sensor crop for RAW/DNG.
+    /// `None` when unknown (JPEGs report their own decoded size).
+    pub fn full_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.sensor?;
+        Some(if matches!(self.exif.orientation, Some(5..=8)) {
+            (h, w)
+        } else {
+            (w, h)
+        })
     }
 }

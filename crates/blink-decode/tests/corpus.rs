@@ -195,4 +195,49 @@ mod full_corpus {
         );
         assert!(jpegs >= 11);
     }
+
+    #[test]
+    fn req_view_4_raw_decode_has_the_sensor_crop_size_on_every_decodable_corpus_file() {
+        let mut decoded = Vec::new();
+        for e in manifest().files {
+            let bytes = e.bytes();
+            let a = analyze(&bytes, kind(&e), &default_backend());
+            if !matches!(a.raw, Some(Ok(_))) {
+                continue; // rawler can't read this body (e.g. Nikon HE); nothing to decode.
+            }
+            let p = blink_decode::decode_raw(&bytes, &a, &default_backend())
+                .unwrap_or_else(|err| panic!("{}: {err}", e.path));
+            assert_eq!(p.source, blink_core::preview::PreviewSource::RawDecode);
+            assert_eq!(
+                Some((p.image.width, p.image.height)),
+                a.full_size(),
+                "{}",
+                e.path
+            );
+            let (w, h) = (e.expected.sensor_w, e.expected.sensor_h);
+            assert_eq!(
+                p.image.width.max(p.image.height),
+                w.max(h),
+                "{}: sensor {w}x{h}",
+                e.path
+            );
+            // Developed pixels are not a flat image.
+            let first = &p.image.data[..3];
+            assert!(
+                p.image
+                    .data
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|px| px[..] != *first),
+                "{}",
+                e.path
+            );
+            decoded.push(e.path.clone());
+        }
+        assert!(
+            decoded.iter().any(|p| p == "sony/NEX-5N.ARW"),
+            "the LOW-RES ARW must decode: {decoded:?}"
+        );
+    }
 }

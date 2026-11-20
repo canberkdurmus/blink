@@ -341,11 +341,12 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                             full_size: (0, 0),
                         });
                     }
+                    // Only a failed zoom decode is news to the user; "no preview" is the badge.
                     Level::Full => {
                         s.loupe.pending_full = false;
+                        s.toast = Some(error);
                     }
                 }
-                s.toast = Some(error);
             }
         }
         Action::MarksLoaded(list) => {
