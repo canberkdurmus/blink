@@ -24,6 +24,7 @@ pub struct Result1 {
     pub id: String,
     pub median_ms: f64,
     pub budget_ms: f64,
+    pub runs_ms: Vec<f64>,
 }
 
 /// Pull a number out of a flat JSON object without a JSON dependency.
@@ -144,6 +145,7 @@ pub fn run(allow_missing_baseline: bool) -> Result {
                 id,
                 median_ms: m,
                 budget_ms: b,
+                runs_ms: json_array(&text, "runs_ms"),
             });
         }
     }
@@ -171,11 +173,60 @@ pub fn run(allow_missing_baseline: bool) -> Result {
     }
     summary.push_str("}\n");
     std::fs::write(out.join(format!("results-{key}.json")), &summary).map_err(|e| e.to_string())?;
+    let md_dir = root().join("target").join("bench");
+    std::fs::create_dir_all(&md_dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        md_dir.join("results.md"),
+        results_md(&key, &results, &lines),
+    )
+    .map_err(|e| e.to_string())?;
     if fails.is_empty() {
         Ok(())
     } else {
         Err(format!("perf regressions:\n  {}", fails.join("\n  ")))
     }
+}
+
+/// Numbers of a flat JSON array field, e.g. `"runs_ms":[1.0, 2.5]`.
+fn json_array(text: &str, key: &str) -> Vec<f64> {
+    let pat = format!("\"{key}\":");
+    let Some(i) = text.find(&pat) else {
+        return Vec::new();
+    };
+    let rest = text[i + pat.len()..].trim_start();
+    let Some(body) = rest.strip_prefix('[').and_then(|r| r.split(']').next()) else {
+        return Vec::new();
+    };
+    body.split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect()
+}
+
+/// Markdown for the gate report (`cargo xtask report` reads `target/bench/results.md`).
+fn results_md(key: &str, results: &[Result1], lines: &[String]) -> String {
+    let mut md = format!(
+        "Target `{key}`, `cargo xtask bench`, release build.\n\n\
+         | ID | Median ms | Budget ms | Raw runs ms |\n|---|---|---|---|\n"
+    );
+    for r in results {
+        let runs = r
+            .runs_ms
+            .iter()
+            .map(|v| format!("{v:.1}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        md.push_str(&format!(
+            "| {} | {:.1} | {:.1} | {runs} |\n",
+            r.id, r.median_ms, r.budget_ms
+        ));
+    }
+    md.push_str("\nVs CI baseline for this target:\n\n```\n");
+    for l in lines {
+        md.push_str(l);
+        md.push('\n');
+    }
+    md.push_str("```\n");
+    md
 }
 
 #[cfg(test)]
@@ -194,6 +245,7 @@ mod tests {
                 id: "PERF-4".into(),
                 median_ms: m,
                 budget_ms: 25.0,
+                runs_ms: vec![m],
             }]
         };
         assert!(compare(&r(54.9), &b).1.is_empty());
@@ -203,5 +255,11 @@ mod tests {
             json_num("{\"median_ms\":75.5,\"x\":1}", "median_ms"),
             Some(75.5)
         );
+        assert_eq!(
+            json_array("{\"runs_ms\":[1.5, 2],\"x\":1}", "runs_ms"),
+            vec![1.5, 2.0]
+        );
+        let md = results_md("k", &r(20.0), &[]);
+        assert!(md.contains("| PERF-4 | 20.0 | 25.0 | 20.0 |"), "{md}");
     }
 }
