@@ -157,8 +157,16 @@ fn req_view_6_j_toggles_the_clipping_overlay_and_i_shows_the_labelled_histogram(
     h.step();
     assert!(h.state().state().loupe.clipping);
     h.key_press(egui::Key::I);
-    h.step();
-    h.step();
+    // The histogram is computed off the UI thread; wait for it (bounded).
+    let start = std::time::Instant::now();
+    while h.query_by_label("Histogram · EMBEDDED").is_none() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "histogram never shown"
+        );
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     h.get_by_label("Histogram · EMBEDDED");
     // The quadrant at 250,250,250 is not clipped; the counts come from the displayed image.
     let hist = h.state().loaded().unwrap().histogram().clone();
