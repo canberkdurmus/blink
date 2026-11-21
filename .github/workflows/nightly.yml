@@ -70,16 +70,23 @@ jobs:
           done
 
   interop:
-    name: darktable / digiKam interop
+    name: darktable interop
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      - name: Interop
-        run: |
-          if [ ! -d tests/interop ]; then echo "interop tests arrive with sidecar writing (M3)"; exit 0; fi
-          sudo apt-get update -q && sudo apt-get install -yq darktable digikam
-          cargo xtask interop
+      - name: Corpus cache
+        uses: actions/cache@v6
+        with:
+          path: corpus/cache
+          key: corpus-${{ hashFiles('corpus/manifest.toml') }}
+      - name: Install darktable (with Lua) and Xvfb
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends darktable xvfb xauth
+      - name: Interop (ADR 0017)
+        run: cargo xtask interop
+      - name: Interop report
+        if: always()
+        run: cat target/interop/report.txt || true
 
   report-failure:
     name: Open/update nightly-failure issue

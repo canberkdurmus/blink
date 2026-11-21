@@ -1,0 +1,30 @@
+[package]
+name = "blink-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MPL-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace (needs nightly + cargo-fuzz; nightly.yml runs it).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+blink-xmp = { path = "../crates/blink-xmp" }
+
+[[bin]]
+name = "xmp_read"
+path = "fuzz_targets/xmp_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xmp_write"
+path = "fuzz_targets/xmp_write.rs"
+test = false
+doc = false
+bench = false

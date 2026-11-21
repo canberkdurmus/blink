@@ -4,3 +4,6 @@ target/
 corpus/cache/
 # generated synthetic fixtures
 corpus/synthetic/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
