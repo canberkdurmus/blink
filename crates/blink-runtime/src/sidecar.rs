@@ -108,7 +108,7 @@ pub fn sidecar_targets(
 
 /// Whether `sidecar` is one of the names `source` writes (FILE-4), on any file system case.
 pub fn belongs_to(sidecar: &Path, source: &Path, owns_adobe_name: bool) -> bool {
-    let eq = |p: PathBuf| p.as_os_str().eq_ignore_ascii_case(sidecar.as_os_str());
+    let eq = |p: PathBuf| blink_core::state::same_name_ci(&p, sidecar);
     eq(darktable_path(source, "xmp")) || (owns_adobe_name && eq(adobe_path(source, "xmp")))
 }
 
@@ -291,7 +291,7 @@ impl<'a> SidecarWriter<'a> {
             .last_written
             .keys()
             .chain(self.baseline.keys())
-            .find(|k| k.as_os_str().eq_ignore_ascii_case(sidecar.as_os_str()))
+            .find(|k| blink_core::state::same_name_ci(k, sidecar))
             .cloned()
             .unwrap_or_else(|| sidecar.to_path_buf());
         let sidecar = sidecar.as_path();

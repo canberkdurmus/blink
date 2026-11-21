@@ -572,10 +572,20 @@ fn stem_of(p: &std::path::Path) -> (Option<&std::path::Path>, String) {
     )
 }
 
+/// The same file on a case-insensitive file system: same folder (compared as paths, so either
+/// separator works), file names equal ignoring ASCII case.
+pub fn same_name_ci(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.parent() == b.parent()
+        && match (a.file_name(), b.file_name()) {
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+            _ => false,
+        }
+}
+
 /// Whether `sidecar` is one of the sidecars `items[item]` writes or reads (FILE-4 names, any
 /// case).
 fn item_has_sidecar(items: &[Item], item: usize, sidecar: &std::path::Path) -> bool {
-    let eq = |p: &std::path::Path| p.as_os_str().eq_ignore_ascii_case(sidecar.as_os_str());
+    let eq = |p: &std::path::Path| same_name_ci(p, sidecar);
     sidecar_writes(items, item, &MarkChange::RevertLabel)
         .iter()
         .any(|e| match e {
@@ -1639,5 +1649,13 @@ mod tests {
         assert_eq!(rating_of(&s, "/f/a.ARW"), Some(5));
         assert!(s.conflicts.is_empty());
         assert_eq!(s.undo.len(), 1);
+    }
+
+    #[test]
+    fn req_file_8_sidecar_names_match_across_separators_and_case() {
+        let joined = Path::new("/f").join("a.ARW.xmp");
+        assert!(same_name_ci(&joined, Path::new("/f/a.arw.XMP")));
+        assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/g/a.xmp")));
+        assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/f/b.xmp")));
     }
 }
