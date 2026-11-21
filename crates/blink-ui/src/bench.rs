@@ -121,14 +121,18 @@ impl Headless {
 
     /// Run one frame with `keys` pressed; returns how long the UI thread took.
     fn frame(&mut self, keys: &[egui::Key]) -> Duration {
+        // Press and release: a key never released turns later presses into repeats, which
+        // mark keys ignore.
         let events = keys
             .iter()
-            .map(|&key| egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
+            .flat_map(|&key| {
+                [true, false].map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
             })
             .collect();
         let input = egui::RawInput {
@@ -321,6 +325,46 @@ pub fn run(script: &Script, folder: &Path, opts: impl Fn() -> Options) -> Result
                     runs_ms: frames,
                 },
             ]
+        }
+        "rate_durable" => {
+            // PERF-7: from a star key to the end of the sidecar's atomic write (temp file,
+            // fsync, rename, directory fsync), debounce included. Each run rates the next item,
+            // so every run creates a sidecar.
+            let mut h = Headless::launch(folder, opts());
+            let mut runs = Vec::new();
+            let stars = [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+            ];
+            for i in 0..script.runs {
+                h.settle(timeout)?;
+                let before = h.app.sidecar_writes_done();
+                let t = Instant::now();
+                h.frame(&[stars[i % 5]]);
+                while h.app.sidecar_writes_done() == before {
+                    if t.elapsed() > timeout {
+                        return Err(format!(
+                            "bench: sidecar never written ({:?})",
+                            h.app.state().toast
+                        ));
+                    }
+                    let f = Instant::now();
+                    h.frame(&[]);
+                    if let Some(rest) = Duration::from_millis(1).checked_sub(f.elapsed()) {
+                        std::thread::sleep(rest);
+                    }
+                }
+                runs.push(ms(t.elapsed()));
+                h.frame(&[egui::Key::ArrowRight]);
+            }
+            vec![metric(
+                "rating key to sidecar durable on disk (debounce + atomic write)",
+                250.0,
+                runs,
+            )]
         }
         other => return Err(format!("bench: unknown scenario {other:?}")),
     };

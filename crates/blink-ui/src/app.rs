@@ -120,6 +120,8 @@ pub struct BlinkApp {
     loader: Loader<Prepared>,
     /// Sidecar writes on their own I/O thread (FILE-4..6).
     sidecars: SidecarService,
+    /// Sidecar writes that completed (durable), for PERF-7.
+    writes_done: Arc<std::sync::atomic::AtomicU64>,
     ctx: egui::Context,
     /// The context the loader wakes; follows the context the app is drawn in.
     wake_ctx: Arc<std::sync::Mutex<egui::Context>>,
@@ -176,6 +178,8 @@ impl BlinkApp {
             }
         });
         let (stx, wake) = (tx.clone(), wake_ctx.clone());
+        let writes_done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let done = writes_done.clone();
         let sidecars = SidecarService::spawn(
             opts.fs.clone(),
             Arc::new(SystemClock),
@@ -187,7 +191,12 @@ impl BlinkApp {
                             source: rep.source,
                             error,
                         },
-                        Ok(()) => return,
+                        Ok(()) => {
+                            if !rep.sidecars.is_empty() {
+                                done.fetch_add(1, std::sync::atomic::Ordering::Release);
+                            }
+                            return;
+                        }
                     },
                     SidecarEvent::External(c) => {
                         if c.conflict() {
@@ -216,6 +225,7 @@ impl BlinkApp {
             fs: opts.fs,
             loader,
             sidecars,
+            writes_done,
             ctx: ctx.clone(),
             wake_ctx,
             tx,
@@ -280,6 +290,11 @@ impl BlinkApp {
     /// Write every queued sidecar change now and wait for it (tests, bench, exit).
     pub fn flush_sidecars(&self) {
         self.sidecars.flush();
+    }
+
+    /// How many sidecar writes have completed (each one durable on disk: PERF-7).
+    pub fn sidecar_writes_done(&self) -> u64 {
+        self.writes_done.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Report sidecar paths as changed, as the folder watcher would (tests).
