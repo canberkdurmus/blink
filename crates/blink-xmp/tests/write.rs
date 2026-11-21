@@ -595,5 +595,8 @@ fn req_file_5_an_unbound_xmp_prefix_is_declared_as_xmp() {
     // `xmp:` used but never declared: it is free, so Blink binds `xmp` on the Description.
     let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>"#;
     let out = s(&write_owned(Some(x.as_bytes()), &edit(Edit::Set(2), Edit::Keep)).unwrap());
-    assert!(out.contains(&format!("xmlns:xmp=\"{NS_XMP}\"")) && out.contains("xmp:Rating=\"2\""), "{out}");
+    assert!(
+        out.contains(&format!("xmlns:xmp=\"{NS_XMP}\"")) && out.contains("xmp:Rating=\"2\""),
+        "{out}"
+    );
 }

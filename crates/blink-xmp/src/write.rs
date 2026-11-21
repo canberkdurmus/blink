@@ -163,7 +163,9 @@ fn xmp_prefix(reader: &NsReader<&[u8]>, src: &[u8]) -> Result<String, String> {
     // neither shadow a foreign binding nor give an undeclared foreign use a meaning.
     for p in ["xmp", "xmpBlink", "xmpBlink2"] {
         let q = format!("{p}:x");
-        let used = src.windows(p.len() + 1).any(|w| w == format!("{p}:").as_bytes());
+        let used = src
+            .windows(p.len() + 1)
+            .any(|w| w == format!("{p}:").as_bytes());
         if !used
             && matches!(
                 reader.resolver().resolve_attribute(QName(&q)).0,
@@ -188,7 +190,11 @@ pub fn write_owned(existing: Option<&[u8]>, edit: &OwnedEdit) -> Result<Vec<u8>,
     };
     // quick-xml skips a leading BOM and reports positions after it: parse past the BOM and
     // shift every position back into `src`.
-    let bom = if src.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+    let bom = if src.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        3
+    } else {
+        0
+    };
     let mut reader = NsReader::from_reader(&src[bom..]);
     reader.config_mut().check_end_names = true;
     let mut descs: Vec<Desc> = Vec::new();
