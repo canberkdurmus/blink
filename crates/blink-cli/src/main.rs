@@ -659,8 +659,7 @@ mod tests {
             out,
             "would update sidecar of x.ARW: set xmp:Rating=5\nwould update sidecar of x.JPG: set xmp:Rating=5\n"
         );
-        // Writing arrives with FILE-4..6 (ADR 0010); invalid values are rejected.
-        assert_ne!(cli(&fs, &["rate", "/f/a.ARW", "3"]).0, 0);
+        // Invalid values are rejected. (Writing without --dry-run: see the next test.)
         assert_ne!(cli(&fs, &["rate", "--dry-run", "/f/a.ARW", "7"]).0, 0);
         assert_ne!(cli(&fs, &["label", "--dry-run", "/f/a.ARW", "pink"]).0, 0);
         assert!(fs.calls().iter().all(|c| matches!(
