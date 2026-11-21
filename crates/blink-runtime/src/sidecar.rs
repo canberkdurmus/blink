@@ -111,6 +111,8 @@ struct Pending {
     rating: Option<Option<i8>>,
     label: Option<Option<String>>,
     since: Instant,
+    /// Failed attempts so far (retries back off).
+    attempts: u32,
 }
 
 /// Outcome of writing one source file's sidecars.
@@ -133,6 +135,21 @@ pub struct SidecarWriter<'a> {
     pending: BTreeMap<PathBuf, Pending>,
     /// Bytes of each sidecar before Blink first wrote it this session (`None`: didn't exist).
     baseline: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    /// Bytes Blink last wrote to each sidecar (`None`: it removed it). A file that no longer
+    /// holds them was changed by another app, so it is never restored over.
+    last_written: BTreeMap<PathBuf, Option<Vec<u8>>>,
+}
+
+/// Re-queue a failed write: retries back off from `DEBOUNCE` up to 30 s, so a sidecar that
+/// can't be written (unparseable, read-only folder) doesn't keep the I/O thread busy.
+fn retry(p: Pending, now: Instant) -> Pending {
+    let attempts = p.attempts + 1;
+    let wait = (DEBOUNCE * 2u32.saturating_pow(attempts.min(9))).min(Duration::from_secs(30));
+    Pending {
+        since: now + wait - DEBOUNCE,
+        attempts,
+        ..p
+    }
 }
 
 fn read_opt(fs: &dyn Fs, p: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -158,6 +175,7 @@ impl<'a> SidecarWriter<'a> {
             style,
             pending: BTreeMap::new(),
             baseline: BTreeMap::new(),
+            last_written: BTreeMap::new(),
         }
     }
 
@@ -174,6 +192,7 @@ impl<'a> SidecarWriter<'a> {
             rating: None,
             label: None,
             since: now,
+            attempts: 0,
         });
         p.owns_adobe_name = owns_adobe_name;
         match change {
@@ -237,8 +256,7 @@ impl<'a> SidecarWriter<'a> {
         if result.is_err() {
             // Keep the changes; the next flush retries (a sidecar written meanwhile is fine:
             // rewriting it with the same values is idempotent apart from MetadataDate).
-            self.pending
-                .insert(source.clone(), Pending { since: now, ..p });
+            self.pending.insert(source.clone(), retry(p, now));
         }
         WriteReport {
             source,
@@ -269,7 +287,14 @@ impl<'a> SidecarWriter<'a> {
         };
         let new = blink_xmp::write_owned(current.as_deref(), &edit).map_err(|e| e.to_string())?;
         // Back at the original values: restore the original bytes exactly (RATE-3).
-        let restore = owned_of(base.as_deref()).is_some_and(|b| Some(b) == owned_of(Some(&new)));
+        // ... but only if the file is still what Blink left there: never over another app's
+        // later changes (FILE-5).
+        let ours = match self.last_written.get(target) {
+            Some(w) => *w == current,
+            None => current == base,
+        };
+        let restore =
+            ours && owned_of(base.as_deref()).is_some_and(|b| Some(b) == owned_of(Some(&new)));
         let fs = self.fs;
         let r = match (restore, &base) {
             (true, None) if current.is_some() => remove_sidecar(fs, target),
@@ -278,6 +303,10 @@ impl<'a> SidecarWriter<'a> {
             (true, Some(b)) => write_atomic(fs, target, b),
             (false, _) => write_atomic(fs, target, &new),
         };
+        if r.is_ok() {
+            let now_on_disk = if restore { base } else { Some(new) };
+            self.last_written.insert(target.to_path_buf(), now_on_disk);
+        }
         r.map_err(|e| e.to_string())
     }
 }

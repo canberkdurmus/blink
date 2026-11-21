@@ -67,6 +67,13 @@ M3 makes Blink write sidecars (FILE-4, FILE-5, FILE-6, FILE-7, FILE-9) and execu
    to those original values, the original bytes are restored instead (`MetadataDate` included).
    A sidecar Blink created is removed. Undoing everything therefore restores every sidecar byte
    for byte, including absence. The same holds when the user manually puts a value back.
+   The restore happens only while the file still holds the bytes Blink last wrote: if another
+   app changed it in the meantime, the normal FILE-5 splice runs instead, so that app's changes
+   survive. A restore also brings back the original `xmp:MetadataDate`. Strictly, FILE-9 says
+   every change Blink makes sets it, so this is a FILE-9 vs RATE-3 conflict. Byte-exact undo
+   wins, because the file then equals what other apps last saw. The M3 gate report flags it.
+10. **Retries back off.** A failed write stays queued and is retried after 200 ms, 400 ms and
+   so on, up to 30 s. A sidecar that can never be written doesn't keep the I/O thread busy.
 8. **`MarkChange::Rating(Option<i8>)`**: `None` removes `xmp:Rating` (undo back to "no rating").
 9. **Dev dependency**: `proptest` 1 (MIT/Apache-2.0) for the FILE-5 property test (and RATE-3
    later). Dev-only, so no runtime policy check is needed beyond `cargo deny`.

@@ -692,3 +692,86 @@ mod full_oracle {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[test]
+fn req_file_5_another_apps_later_changes_are_never_restored_over() {
+    let clock = FixedClock(NOW);
+    // A: Lightroom sidecar rated 2; Blink rates 4; another app adds a keyword; Blink rates 2.
+    let fs = MemFs::new();
+    fs.add_file("/f/a.ARW", b"raw".to_vec());
+    fs.add_file("/f/a.xmp", sidecars::lightroom(2, None));
+    let mut w = SidecarWriter::new(&fs, &clock, SidecarStyle::Adobe);
+    let mut rate = |w: &mut SidecarWriter, r| {
+        w.queue(
+            "/f/a.ARW".into(),
+            MarkChange::Rating(r),
+            true,
+            Instant::now(),
+        );
+        for rep in w.flush_all() {
+            rep.result.unwrap();
+        }
+    };
+    rate(&mut w, Some(4));
+    let edited = String::from_utf8(fs.peek("/f/a.xmp").unwrap())
+        .unwrap()
+        .replace(
+            "<rdf:li>beach</rdf:li>",
+            "<rdf:li>beach</rdf:li><rdf:li>sunset</rdf:li>",
+        );
+    fs.add_file("/f/a.xmp", edited);
+    rate(&mut w, Some(2));
+    let t = String::from_utf8(fs.peek("/f/a.xmp").unwrap()).unwrap();
+    assert!(t.contains("sunset"), "{t}");
+    assert_eq!(owned(&fs, "/f/a.xmp"), r(2));
+    // B: Blink creates a sidecar; another app adds to it; an undo back to "no rating" must not
+    // delete it.
+    let fs = MemFs::new();
+    fs.add_file("/f/b.ARW", b"raw".to_vec());
+    let mut w = SidecarWriter::new(&fs, &clock, SidecarStyle::Adobe);
+    w.queue(
+        "/f/b.ARW".into(),
+        MarkChange::Rating(Some(3)),
+        true,
+        Instant::now(),
+    );
+    w.flush_all();
+    let added = String::from_utf8(fs.peek("/f/b.xmp").unwrap())
+        .unwrap()
+        .replace(
+            "xmlns:xmp=",
+            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" dc:format=\"x\" xmlns:xmp=",
+        );
+    fs.add_file("/f/b.xmp", added);
+    w.queue(
+        "/f/b.ARW".into(),
+        MarkChange::Rating(None),
+        true,
+        Instant::now(),
+    );
+    w.flush_all();
+    let t = String::from_utf8(fs.peek("/f/b.xmp").expect("kept")).unwrap();
+    assert!(t.contains("dc:format=\"x\""), "{t}");
+    assert_eq!(read_owned(t.as_bytes()).unwrap().rating, None);
+}
+
+#[test]
+fn req_file_6_failed_writes_back_off() {
+    let fs = MemFs::new();
+    fs.add_file("/f/a.ARW", b"raw".to_vec());
+    fs.add_file("/f/a.xmp", b"<broken".to_vec());
+    let clock = FixedClock(NOW);
+    let mut w = SidecarWriter::new(&fs, &clock, SidecarStyle::Adobe);
+    let t0 = Instant::now();
+    w.queue("/f/a.ARW".into(), MarkChange::Rating(Some(1)), true, t0);
+    let mut at = t0 + DEBOUNCE;
+    let mut gaps = Vec::new();
+    for _ in 0..5 {
+        assert!(w.flush_due(at)[0].result.is_err());
+        let next = w.next_due().unwrap();
+        gaps.push(next - at);
+        at = next;
+    }
+    assert!(gaps.windows(2).all(|g| g[1] > g[0]), "{gaps:?}");
+    assert!(w.flush_due(at - Duration::from_millis(1)).is_empty());
+}
