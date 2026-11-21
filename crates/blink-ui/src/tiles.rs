@@ -20,10 +20,84 @@ pub struct Tile {
     pub image: Arc<ColorImage>,
 }
 
-/// An image ready for upload.
+/// Long edge of the screen-resolution variant (SPEC §8.3: navigate at screen resolution).
+pub const SCREEN_LONG: u32 = 2560;
+
+/// A set of tiles covering one image at one resolution.
 #[derive(Debug, Clone, Default)]
-pub struct Prepared {
+pub struct TileSet {
+    /// Pixel size of this variant.
+    pub size: (u32, u32),
     pub tiles: Vec<Tile>,
+}
+
+/// An image ready for upload. Images larger than [`SCREEN_LONG`] get a screen-resolution
+/// variant at once, and their full-resolution tiles only when a zoom needs them
+/// ([`Prepared::full_or_build`], off the UI thread). Smaller images have only full tiles.
+/// So moving to the next item builds and uploads a few MB, never ~100 MB (PERF-2, PERF-3).
+#[derive(Debug, Default)]
+pub struct Prepared {
+    full: std::sync::OnceLock<TileSet>,
+    pub screen: Option<TileSet>,
+}
+
+impl Prepared {
+    /// Full-resolution tiles, if built.
+    pub fn full(&self) -> Option<&TileSet> {
+        self.full.get()
+    }
+
+    /// Full-resolution tiles of `img` (the pixels this was prepared from), building them now
+    /// if needed. Blocks for tens of ms on a large image: call it off the UI thread.
+    pub fn full_or_build(&self, img: &RgbImage) -> &TileSet {
+        self.full.get_or_init(|| full_set(img))
+    }
+}
+
+fn full_set(img: &RgbImage) -> TileSet {
+    TileSet {
+        size: (img.width, img.height),
+        tiles: tiles_of(img, |[r, g, b]| Color32::from_rgb(r, g, b)),
+    }
+}
+
+/// Box-filter downscale by an integer factor `k` (all cores).
+pub fn downscale(img: &RgbImage, k: u32) -> RgbImage {
+    let (w, h) = (img.width.div_ceil(k), img.height.div_ceil(k));
+    let mut out = vec![0u8; w as usize * h as usize * 3];
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let rows = (h as usize).div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        for (band, chunk) in out.chunks_mut(rows * w as usize * 3).enumerate() {
+            s.spawn(move || {
+                for (r, row) in chunk.chunks_mut(w as usize * 3).enumerate() {
+                    let oy = (band * rows + r) as u32;
+                    let y0 = oy * k;
+                    let y1 = (y0 + k).min(img.height);
+                    for ox in 0..w {
+                        let x0 = ox * k;
+                        let x1 = (x0 + k).min(img.width);
+                        let mut acc = [0u32; 3];
+                        for y in y0..y1 {
+                            let base = (y as usize * img.width as usize + x0 as usize) * 3;
+                            let line = &img.data[base..base + (x1 - x0) as usize * 3];
+                            for p in line.as_chunks::<3>().0 {
+                                acc[0] += u32::from(p[0]);
+                                acc[1] += u32::from(p[1]);
+                                acc[2] += u32::from(p[2]);
+                            }
+                        }
+                        let n = (y1 - y0) * (x1 - x0);
+                        let o = ox as usize * 3;
+                        for c in 0..3 {
+                            row[o + c] = ((acc[c] + n / 2) / n) as u8;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    RgbImage::new(w, h, out).expect("downscale size")
 }
 
 fn tile_grid(w: u32, h: u32) -> impl Iterator<Item = (u32, u32, u32, u32)> {
@@ -70,8 +144,18 @@ pub fn tiles_of(img: &RgbImage, pixel: impl Fn([u8; 3]) -> Color32 + Sync) -> Ve
 
 /// The loader's `prepare` hook: displayed pixels as tiles.
 pub fn prepare(p: &Preview) -> Prepared {
-    Prepared {
-        tiles: tiles_of(&p.image, |[r, g, b]| Color32::from_rgb(r, g, b)),
+    let img = &p.image;
+    let long = img.width.max(img.height);
+    let out = Prepared::default();
+    if long > SCREEN_LONG {
+        let small = downscale(img, long.div_ceil(SCREEN_LONG));
+        Prepared {
+            screen: Some(full_set(&small)),
+            ..out
+        }
+    } else {
+        let _ = out.full.set(full_set(img));
+        out
     }
 }
 
@@ -103,6 +187,24 @@ mod tests {
         let last = t.last().unwrap();
         assert_eq!((last.x, last.y, last.w, last.h), (4096, 2048, 4, 1));
         assert_eq!(last.image.size, [4, 1]);
+    }
+
+    #[test]
+    fn large_images_get_a_screen_resolution_variant() {
+        let img = RgbImage::new(6000, 4000, vec![200; 6000 * 4000 * 3]).unwrap();
+        let p = prepare(&blink_decode::Preview {
+            image: img,
+            source: blink_core::preview::PreviewSource::Embedded,
+            space: blink_decode::color::SourceSpace::Srgb,
+            orientation: 1,
+        });
+        assert!(p.full().is_none(), "full tiles are built on demand");
+        let s = p.screen.as_ref().unwrap();
+        assert_eq!(s.size, (2000, 1334));
+        assert_eq!(s.tiles[0].image.pixels[0], Color32::from_rgb(200, 200, 200));
+        // Box filter averages, rounding to nearest.
+        let d = downscale(&RgbImage::new(2, 1, vec![0, 0, 0, 3, 3, 3]).unwrap(), 2);
+        assert_eq!(d.data, [2, 2, 2]);
     }
 
     #[test]

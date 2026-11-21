@@ -304,6 +304,22 @@ impl<T: Send + Sync + 'static> Loader<T> {
         q.jobs.is_empty() && q.running.is_empty()
     }
 
+    /// Forget everything: cancel queued jobs and empty the cache (a folder was (re)opened, its
+    /// files may have changed on disk). A running full-resolution load still reports back; the
+    /// reducer ignores it unless it matches the current item.
+    pub fn clear(&self) {
+        self.shared.generation.fetch_add(1, Ordering::SeqCst);
+        let mut q = lock(&self.shared.queue);
+        q.jobs.clear();
+        q.wanted.clear();
+        drop(q);
+        *lock(&self.shared.current) = None;
+        lock(&self.shared.full).next = None;
+        let mut c = lock(&self.shared.cache);
+        c.map.clear();
+        c.bytes = 0;
+    }
+
     /// Bytes held by the L2 cache.
     pub fn cache_bytes(&self) -> usize {
         lock(&self.shared.cache).bytes

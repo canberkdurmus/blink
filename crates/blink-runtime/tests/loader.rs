@@ -300,3 +300,26 @@ fn req_view_1_a_running_prefetch_still_wanted_by_a_newer_show_is_not_dropped() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[test]
+fn loader_clear_forgets_cached_images() {
+    let fs = MemFs::new();
+    fs.add_file("/f/a.ARW", low_res_raw());
+    let loader: Loader<()> =
+        Loader::new(Arc::new(fs), Arc::new(FakeRaw), 1, 1 << 30, |_| (), || {});
+    let item = blink_core::state::ItemRef {
+        path: "/f/a.ARW".into(),
+        kind: blink_core::formats::FileKind::Raw,
+        paired_jpeg: None,
+    };
+    loader.show(&item, &[]);
+    loader.wait(Duration::from_secs(20)).expect("loaded");
+    assert!(loader.get(Path::new("/f/a.ARW"), Level::Preview).is_some());
+    loader.clear();
+    assert!(loader.get(Path::new("/f/a.ARW"), Level::Preview).is_none());
+    assert_eq!(loader.cache_bytes(), 0);
+    assert!(
+        loader.show(&item, &[]).is_none(),
+        "re-read, not answered from the old cache"
+    );
+}

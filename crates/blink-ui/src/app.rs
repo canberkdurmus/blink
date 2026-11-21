@@ -25,6 +25,20 @@ const L1_IMAGES: usize = 6;
 
 type Key2 = (PathBuf, Level);
 
+/// Which tile set of a loaded image is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Variant {
+    /// Downscaled to at most `SCREEN_LONG` px (enough while it covers the screen).
+    Screen,
+    /// Every pixel (zoomed in).
+    Full,
+}
+
+type Key3 = (PathBuf, Level, Variant);
+type LoadedRef = Arc<Loaded<Prepared>>;
+type WeakLoaded = std::sync::Weak<Loaded<Prepared>>;
+type OverlayCell = (WeakLoaded, Arc<OnceLock<Vec<Tile>>>);
+
 /// What the last frame drew in the loupe (for tests and the bench harness).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Displayed {
@@ -55,8 +69,11 @@ impl From<&Tile> for Geom {
 
 /// GPU textures of one image. Only geometry is kept next to each texture, so the CPU pixels
 /// are freed with the L2 entry (or, for overlays, once uploaded).
-#[derive(Default)]
 struct Uploaded {
+    /// The image these textures were made from: a reloaded image never reuses them.
+    owner: std::sync::Weak<Loaded<Prepared>>,
+    /// Pixel size of the uploaded variant.
+    size: (u32, u32),
     tiles: Vec<(Geom, TextureHandle)>,
     total: usize,
 }
@@ -90,16 +107,19 @@ pub struct BlinkApp {
     wake_ctx: Arc<std::sync::Mutex<egui::Context>>,
     tx: Sender<Action>,
     rx: Receiver<Action>,
-    textures: HashMap<Key2, Uploaded>,
+    textures: HashMap<Key3, Uploaded>,
     /// L1 recency, most recent last.
     l1_order: VecDeque<Key2>,
     /// Clipping overlay tiles being computed (dropped once uploaded).
-    overlays: HashMap<Key2, Arc<OnceLock<Vec<Tile>>>>,
+    overlays: HashMap<Key2, OverlayCell>,
+    /// Full-resolution tile builds running off the UI thread, by image.
+    full_pending: HashMap<Key2, WeakLoaded>,
     overlay_textures: HashMap<Key2, Uploaded>,
-    /// Histograms being computed off the UI thread.
-    hist_pending: std::collections::HashSet<Key2>,
-    /// The image the loupe draws this frame (chosen before the panels, so they agree).
-    drawn: Option<Arc<Loaded<Prepared>>>,
+    /// Histograms being computed off the UI thread, by image.
+    hist_pending: HashMap<Key2, WeakLoaded>,
+    /// The image (and tile set) the loupe draws this frame, chosen before the panels so they
+    /// agree with the loupe.
+    drawn: Option<(LoadedRef, Variant)>,
     displayed: Option<Displayed>,
     toast_at: f64,
     drag_moved: bool,
@@ -139,6 +159,7 @@ impl BlinkApp {
             overlays: HashMap::new(),
             overlay_textures: HashMap::new(),
             hist_pending: Default::default(),
+            full_pending: Default::default(),
             drawn: None,
             displayed: None,
             toast_at: 0.0,
@@ -161,8 +182,8 @@ impl BlinkApp {
     }
 
     /// The loaded image the loupe draws (this frame's choice).
-    pub fn loaded(&self) -> Option<Arc<Loaded<Prepared>>> {
-        self.drawn.clone()
+    pub fn loaded(&self) -> Option<LoadedRef> {
+        self.drawn.as_ref().map(|(l, _)| l.clone())
     }
 
     /// Request a real RAW decode of the current item (bench scripts, PERF-5).
@@ -209,8 +230,10 @@ impl BlinkApp {
                 self.overlay_textures.clear();
                 self.overlays.clear();
                 self.hist_pending.clear();
+                self.full_pending.clear();
                 self.l1_order.clear();
                 self.drawn = None;
+                self.loader.clear();
             }
             let (s, fx) = reduce(&self.state, a);
             let toast_changed = s.toast != self.state.toast;
@@ -421,7 +444,7 @@ impl BlinkApp {
     }
 
     fn info_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(l) = self.drawn.clone() else {
+        let Some(l) = self.loaded() else {
             ui.label("—");
             return;
         };
@@ -438,7 +461,12 @@ impl BlinkApp {
             None => {
                 ui.label(format!("Histogram · {} · computing…", l.source.badge()));
                 let key = (l.path.clone(), l.level);
-                if self.hist_pending.insert(key) {
+                let same = self
+                    .hist_pending
+                    .get(&key)
+                    .is_some_and(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&l)));
+                if !same {
+                    self.hist_pending.insert(key, Arc::downgrade(&l));
                     let ctx = self.ctx.clone();
                     std::thread::spawn(move || {
                         l.histogram();
@@ -496,19 +524,22 @@ impl BlinkApp {
             .shown
             .clone()
             .filter(|s| Some(&s.path) == current.as_ref());
-        if let (Some(l), Some(img_rect)) = (self.drawn.clone(), self.state.loupe.image_rect()) {
+        if let (Some((l, variant)), Some(img_rect)) =
+            (self.drawn.clone(), self.state.loupe.image_rect())
+        {
             let screen = Rect::from_min_size(
                 rect.min + Vec2::new(img_rect.x, img_rect.y) / ppp,
                 Vec2::new(img_rect.w, img_rect.h) / ppp,
             );
             {
-                let key = (l.path.clone(), l.level);
+                let key = (l.path.clone(), l.level, variant);
                 let full = (l.size.0 as f32, l.size.1 as f32);
                 if let Some(up) = self.textures.get(&key) {
+                    let size = (up.size.0 as f32, up.size.1 as f32);
                     for (t, tex) in &up.tiles {
                         painter.image(
                             tex.id(),
-                            tile_rect(screen, full, *t),
+                            tile_rect(screen, size, *t),
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
@@ -598,43 +629,104 @@ impl BlinkApp {
         (!s.is_empty()).then_some(s)
     }
 
-    /// The image to draw for `path`: the one matching the shown source if its textures are
-    /// complete; while a full-resolution image is still uploading, the preview stays.
-    fn drawable(&mut self, path: &Path, source: PreviewSource) -> Option<Arc<Loaded<Prepared>>> {
+    /// What to draw for `path`, best first: the full-resolution image matching the shown
+    /// source, then the preview; for each, the screen-size tiles when they cover the loupe,
+    /// else every pixel. Draws the first candidate whose textures are complete. Screen-size
+    /// tiles (and small images) upload at once; full-size tiles of a large image stream in at
+    /// `FULL_TILES_PER_FRAME`, so no frame uploads ~100 MB (PERF-2, PERF-5).
+    fn drawable(&mut self, path: &Path, source: PreviewSource) -> Option<(LoadedRef, Variant)> {
+        let on_screen = self
+            .state
+            .loupe
+            .image_rect()
+            .map_or(f32::MAX, |r| r.w.max(r.h));
         let full = self
             .loader
             .get(path, Level::Full)
             .filter(|l| l.source == source);
-        if let Some(f) = full {
-            if self.upload(&f, FULL_TILES_PER_FRAME) {
-                return Some(f);
+        let preview = self.loader.get(path, Level::Preview);
+        let mut candidates = Vec::new();
+        for l in [full, preview].into_iter().flatten() {
+            let covers = l
+                .prepared
+                .screen
+                .as_ref()
+                .is_some_and(|s| s.size.0.max(s.size.1) as f32 + 0.5 >= on_screen);
+            if covers {
+                candidates.push((l, Variant::Screen));
+            } else {
+                let has_screen = l.prepared.screen.is_some();
+                candidates.push((l.clone(), Variant::Full));
+                if has_screen {
+                    candidates.push((l, Variant::Screen));
+                }
+            }
+        }
+        for (l, v) in candidates {
+            let budget = if v == Variant::Screen || l.prepared.screen.is_none() {
+                usize::MAX
+            } else {
+                FULL_TILES_PER_FRAME
+            };
+            if self.upload(&l, v, budget) {
+                return Some((l, v));
             }
             self.ctx.request_repaint();
         }
-        let p = self.loader.get(path, Level::Preview)?;
-        self.upload(&p, usize::MAX);
-        Some(p)
+        None
     }
 
-    /// Upload up to `budget` more tiles of `l`. Returns true when all are on the GPU.
-    fn upload(&mut self, l: &Loaded<Prepared>, budget: usize) -> bool {
-        let key = (l.path.clone(), l.level);
-        self.l1_order.retain(|k| k != &key);
-        self.l1_order.push_back(key.clone());
+    /// Upload up to `budget` more tiles of `l`'s variant `v`. True when all are on the GPU.
+    fn upload(&mut self, l: &LoadedRef, v: Variant, budget: usize) -> bool {
+        let key2 = (l.path.clone(), l.level);
+        self.l1_order.retain(|k| k != &key2);
+        self.l1_order.push_back(key2);
         while self.l1_order.len() > L1_IMAGES {
             if let Some(old) = self.l1_order.pop_front() {
-                self.textures.remove(&old);
+                self.textures
+                    .retain(|(p, lv, _), _| (p, lv) != (&old.0, &old.1));
                 self.overlay_textures.remove(&old);
                 self.overlays.remove(&old);
                 self.hist_pending.remove(&old);
+                self.full_pending.remove(&old);
             }
         }
-        let up = self.textures.entry(key).or_insert_with(|| Uploaded {
+        let set = match (v, &l.prepared.screen) {
+            (Variant::Screen, Some(s)) => s,
+            _ => match l.prepared.full() {
+                Some(f) => f,
+                None => {
+                    // Build the full-resolution tiles off the UI thread; draw something else.
+                    let k = (l.path.clone(), l.level);
+                    let same = self
+                        .full_pending
+                        .get(&k)
+                        .is_some_and(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(l)));
+                    if !same {
+                        self.full_pending.insert(k, Arc::downgrade(l));
+                        let (src, ctx) = (l.clone(), self.ctx.clone());
+                        std::thread::spawn(move || {
+                            src.prepared.full_or_build(&src.preview.image);
+                            ctx.request_repaint();
+                        });
+                    }
+                    return false;
+                }
+            },
+        };
+        let key = (l.path.clone(), l.level, v);
+        let fresh = |l: &LoadedRef| Uploaded {
+            owner: Arc::downgrade(l),
+            size: set.size,
             tiles: Vec::new(),
-            total: l.prepared.tiles.len(),
-        });
+            total: set.tiles.len(),
+        };
+        let up = self.textures.entry(key).or_insert_with(|| fresh(l));
+        if !std::ptr::eq(up.owner.as_ptr(), Arc::as_ptr(l)) {
+            *up = fresh(l); // the cache reloaded this image: never draw the old textures
+        }
         let start = up.tiles.len();
-        for t in l.prepared.tiles.iter().skip(start).take(budget) {
+        for t in set.tiles.iter().skip(start).take(budget) {
             let tex = self.ctx.load_texture(
                 format!("{}#{}x{}", l.path.display(), t.x, t.y),
                 t.image.clone(),
@@ -653,21 +745,35 @@ impl BlinkApp {
         full: (f32, f32),
     ) {
         let key = (l.path.clone(), l.level);
-        let cell = self.overlays.entry(key.clone()).or_insert_with(|| {
+        let stale = self
+            .overlays
+            .get(&key)
+            .is_none_or(|(w, _)| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(l)));
+        if stale {
+            // New or reloaded image: compute its overlay off the UI thread.
             let cell = Arc::new(OnceLock::new());
-            let (c, l, ctx) = (cell.clone(), l.clone(), self.ctx.clone());
+            let (c, src, ctx) = (cell.clone(), l.clone(), self.ctx.clone());
             std::thread::spawn(move || {
-                let _ = c.set(tiles::overlay(&l.preview.image));
+                let _ = c.set(tiles::overlay(&src.preview.image));
                 ctx.request_repaint();
             });
-            cell
-        });
+            self.overlays.insert(key.clone(), (Arc::downgrade(l), cell));
+            self.overlay_textures.remove(&key);
+        }
+        let cell = self.overlays[&key].1.clone();
         let Some(tiles) = cell.get() else {
             return;
         };
         // Same per-frame budget as full images, so the overlay never stalls a frame (PERF-5).
-        let up = self.overlay_textures.entry(key.clone()).or_default();
-        up.total = tiles.len();
+        let up = self
+            .overlay_textures
+            .entry(key.clone())
+            .or_insert_with(|| Uploaded {
+                owner: Arc::downgrade(l),
+                size: l.size,
+                tiles: Vec::new(),
+                total: tiles.len(),
+            });
         for t in tiles.iter().skip(up.tiles.len()).take(FULL_TILES_PER_FRAME) {
             let tex = self.ctx.load_texture(
                 format!("clip#{}x{}", t.x, t.y),
@@ -684,7 +790,7 @@ impl BlinkApp {
         if !tiles.is_empty() {
             let done = Arc::new(OnceLock::new());
             let _ = done.set(Vec::new());
-            self.overlays.insert(key, done);
+            self.overlays.insert(key, (Arc::downgrade(l), done));
         }
         for (t, tex) in &up.tiles {
             painter.image(
