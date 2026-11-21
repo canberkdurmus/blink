@@ -71,6 +71,11 @@ JSON results. `cargo xtask bench` runs the standard scripts and compares with
 - CI runners (4 cores, no GPU) are much slower than the reference-class laptop (e.g. PERF-3
   ~270 ms/item, PERF-5 ~2.1 s). Per SPEC §7 their numbers are **regression baselines**; the
   absolute budgets are judged on the reference-class machine (as for PERF-4, M1 report).
+- **Noise floor.** `cargo xtask bench` compares a median against `max(baseline, 2 ms)`: a 10 %
+  change of a 0.5 ms PERF-2 or of a 0.2 ms longest frame (a maximum over hundreds of frames) is
+  scheduler jitter, not a regression. Above 2 ms the SPEC §7 rule (> 10 % fails) applies as is.
+- Linux CI baselines (run 44888085300): PERF-1 184.9, PERF-2 0.5, PERF-3 103.9, PERF-5 1999.5,
+  PERF-5/frame 0.2 ms.
 - The gate report asks the owner to confirm the absolute budgets on real hardware with a GPU
   (HUMAN_TODO).
 - `DecodeRaw` is not bound to a key in v1. It exists for honest measurement and stays covered

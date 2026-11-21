@@ -59,6 +59,10 @@ pub fn parse_baseline(text: &str) -> BTreeMap<String, f64> {
 }
 
 /// Compare results with baselines. Returns (table lines, failures).
+/// Medians are compared against at least this many ms: below it, scheduler jitter dominates
+/// (PERF-2, and the longest-frame metric, a maximum over hundreds of frames).
+pub const NOISE_FLOOR_MS: f64 = 2.0;
+
 pub fn compare(
     results: &[Result1],
     baseline: &BTreeMap<String, f64>,
@@ -72,7 +76,9 @@ pub fn compare(
         let (base, delta, status) = match baseline.get(&r.id) {
             Some(&b) => {
                 let d = (r.median_ms - b) / b * 100.0;
-                let st = if d > 10.0 {
+                // Below the 2 ms floor, 10 % is timer and scheduler noise (ADR 0014).
+                let floor = b.max(NOISE_FLOOR_MS);
+                let st = if r.median_ms > floor * 1.1 {
                     fails.push(format!(
                         "{}: {:.1} ms is {d:+.1}% vs baseline {b:.1} ms",
                         r.id, r.median_ms
@@ -234,6 +240,22 @@ fn results_md(key: &str, results: &[Result1], lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub_millisecond_medians_compare_against_a_2_ms_floor() {
+        let r = |id: &str, m: f64| Result1 {
+            id: id.into(),
+            median_ms: m,
+            budget_ms: 16.0,
+            runs_ms: vec![m],
+        };
+        let base: BTreeMap<String, f64> =
+            [("PERF-2".to_string(), 0.5), ("PERF-1".to_string(), 160.0)].into();
+        let (_, fails) = compare(&[r("PERF-2", 2.15), r("PERF-1", 175.0)], &base);
+        assert!(fails.is_empty(), "{fails:?}");
+        let (_, fails) = compare(&[r("PERF-2", 2.3), r("PERF-1", 177.0)], &base);
+        assert_eq!(fails.len(), 2, "{fails:?}");
+    }
 
     #[test]
     fn baseline_parse_and_compare() {
