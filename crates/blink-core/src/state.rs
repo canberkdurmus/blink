@@ -1294,11 +1294,12 @@ mod tests {
         s.marks.get(Path::new(p)).and_then(|m| m.label.clone())
     }
 
-    fn writes(fx: &[Effect]) -> Vec<(String, MarkChange)> {
+    /// Paths compare by component, so a Windows join `/f\a.ARW` equals `/f/a.ARW`.
+    fn writes(fx: &[Effect]) -> Vec<(PathBuf, MarkChange)> {
         fx.iter()
             .filter_map(|e| match e {
                 Effect::WriteSidecar { source, change, .. } => {
-                    Some((source.display().to_string(), change.clone()))
+                    Some((source.clone(), change.clone()))
                 }
                 _ => None,
             })
