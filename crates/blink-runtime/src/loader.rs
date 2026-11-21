@@ -39,8 +39,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[derive(Debug, Default)]
 struct Pace {
     last_show: Option<std::time::Instant>,
-    /// The nearest item ahead at the last `Show`: arriving there is one more step.
-    next_ahead: Option<PathBuf>,
+    /// The item shown at the last `Show`.
+    current: Option<PathBuf>,
+    /// The items ahead at the last `Show`, nearest first: arriving at the n-th is n steps.
+    ahead: Vec<PathBuf>,
     /// Smoothed seconds between steps; `None` when not moving steadily.
     interval: Option<f64>,
     /// Smoothed seconds per preview job (read, decode, prepare).
@@ -52,17 +54,23 @@ fn smooth(old: Option<f64>, new: f64) -> f64 {
 }
 
 impl Pace {
-    fn shown(&mut self, current: &Path, next_ahead: Option<&ItemRef>, now: std::time::Instant) {
-        let step = self.next_ahead.as_deref() == Some(current);
-        self.interval = match (step, self.last_show) {
-            // A pause longer than a key repeat is not part of the same run.
-            (true, Some(t)) if now - t < std::time::Duration::from_millis(250) => {
-                Some(smooth(self.interval, (now - t).as_secs_f64()))
+    fn shown(&mut self, current: &Path, ahead: &[ItemRef], now: std::time::Instant) {
+        if self.current.as_deref() == Some(current) {
+            return; // the same item again (e.g. a zoom): not a move, the run goes on
+        }
+        // A delayed frame can carry several key repeats: a move n items ahead is n steps.
+        let steps = self.ahead.iter().position(|a| a == current).map(|i| i + 1);
+        self.interval = match (steps, self.last_show) {
+            (Some(n), Some(t)) => {
+                let per_step = (now - t).as_secs_f64() / n as f64;
+                // A pause longer than a key repeat is not part of the same run.
+                (per_step < 0.25).then(|| smooth(self.interval, per_step))
             }
             _ => None,
         };
         self.last_show = Some(now);
-        self.next_ahead = next_ahead.map(|a| a.path.clone());
+        self.current = Some(current.to_path_buf());
+        self.ahead = ahead.iter().map(|a| a.path.clone()).collect();
     }
 
     /// No move for longer than two step intervals: the user stopped on the current item.
@@ -83,6 +91,9 @@ fn lead(interval: Option<f64>, latency: Option<f64>, ahead: usize) -> usize {
     }
 }
 
+/// Items decoded from the lead item on (PERF-3), like the prefetch window's 8 ahead.
+const FAR_RUN: usize = 8;
+
 /// Job order for a `Show` with lead `k`: from the lead item on, then the current item, then
 /// the rest of the window in order.
 fn priority<'a>(
@@ -94,7 +105,8 @@ fn priority<'a>(
     if k == 0 {
         return std::iter::once(current).chain(prefetch).collect();
     }
-    let far = &ahead[k - 1..];
+    // The lead item and the next few: as many as the prefetch window holds ahead.
+    let far = &ahead[k - 1..(k - 1 + FAR_RUN).min(ahead.len())];
     far.iter()
         .chain(std::iter::once(current))
         .chain(prefetch.iter().filter(|p| !far.contains(p)))
@@ -333,7 +345,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
     ) -> Option<Action> {
         let k = {
             let mut p = lock(&self.shared.pace);
-            p.shown(&current.path, ahead.first(), std::time::Instant::now());
+            p.shown(&current.path, ahead, std::time::Instant::now());
             lead(p.interval, p.latency, ahead.len())
         };
         let order = priority(current, prefetch, ahead, k);
@@ -778,12 +790,12 @@ mod pace_tests {
     fn req_perf_3_steady_steps_measure_the_interval_and_a_stop_settles() {
         let t0 = Instant::now();
         let mut p = Pace::default();
-        p.shown(&item(0).path, Some(&item(1)), t0);
+        p.shown(&item(0).path, &[item(1)], t0);
         assert_eq!(p.interval, None);
         for n in 1..=5 {
             p.shown(
                 &item(n).path,
-                Some(&item(n + 1)),
+                &[item(n + 1)],
                 t0 + Duration::from_millis(25 * n as u64),
             );
         }
@@ -795,7 +807,7 @@ mod pace_tests {
         // A jump (not the next item ahead) ends the run.
         p.shown(
             &item(50).path,
-            Some(&item(51)),
+            &[item(51)],
             last + Duration::from_millis(25),
         );
         assert_eq!(p.interval, None);
@@ -803,9 +815,55 @@ mod pace_tests {
         // So does a long pause.
         p.shown(
             &item(51).path,
-            Some(&item(52)),
+            &[item(52)],
             last + Duration::from_millis(400),
         );
         assert_eq!(p.interval, None);
+    }
+
+    #[test]
+    fn req_perf_3_a_lead_past_the_prefetch_window_decodes_a_short_run_from_the_lead() {
+        // 280 ms decodes at 25 ms per step: start 12 items ahead, beyond the 8 prefetched.
+        let (cur, ahead) = (item(0), (1..=32).map(item).collect::<Vec<_>>());
+        let prefetch: Vec<_> = (1..=8).map(item).collect();
+        let k = lead(Some(0.025), Some(0.28), ahead.len());
+        assert_eq!(k, 12);
+        let order: Vec<_> = priority(&cur, &prefetch, &ahead, k)
+            .iter()
+            .map(|i| i.path.clone())
+            .collect();
+        let want: Vec<_> = (12..=19)
+            .chain([0])
+            .chain(1..=8)
+            .map(|n| item(n).path)
+            .collect();
+        assert_eq!(
+            order, want,
+            "8 items from the lead, then the current item and the window"
+        );
+    }
+
+    #[test]
+    fn req_perf_3_a_frame_that_merges_key_repeats_keeps_the_run() {
+        // A busy machine delays a frame; two 25 ms key repeats land in it. The run goes on,
+        // at 25 ms per item, and so does a repeated `Show` of the same item (e.g. a zoom).
+        let t0 = Instant::now();
+        let ahead = |n: usize| ((n + 1)..=(n + 8)).map(item).collect::<Vec<_>>();
+        let mut p = Pace::default();
+        for n in 0..=3 {
+            p.shown(
+                &item(n).path,
+                &ahead(n),
+                t0 + Duration::from_millis(25 * n as u64),
+            );
+        }
+        p.shown(&item(5).path, &ahead(5), t0 + Duration::from_millis(125));
+        let i = p.interval.expect("still a run");
+        assert!((i - 0.025).abs() < 1e-6, "{i}");
+        p.shown(&item(5).path, &ahead(5), t0 + Duration::from_millis(130));
+        assert_eq!(p.interval, Some(i));
+        // A frame stalled 200 ms that covered 8 repeats is still the same run.
+        p.shown(&item(13).path, &ahead(13), t0 + Duration::from_millis(325));
+        assert!(p.interval.is_some());
     }
 }

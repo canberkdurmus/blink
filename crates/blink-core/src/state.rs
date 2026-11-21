@@ -6,7 +6,7 @@
 use crate::formats::{FileKind, Formats};
 use crate::item::{Item, ScannedFile, build_items};
 use crate::preview::PreviewSource;
-use crate::view::{Direction, Loupe, Shown, Zoom, prefetch_window};
+use crate::view::{DECODE_AHEAD, Direction, Loupe, Shown, Zoom, prefetch_window};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -94,11 +94,12 @@ impl State {
     fn show_effect(&self) -> Option<Effect> {
         let cur = self.current?;
         let window = prefetch_window(cur, self.items.len(), self.direction);
-        let forward = self.direction == Direction::Forward;
-        let ahead = window
-            .iter()
-            .filter(|&&i| (i > cur) == forward)
-            .map(|&i| ItemRef::of(&self.items[i]))
+        let ahead = (1..=DECODE_AHEAD)
+            .map_while(|n| match self.direction {
+                Direction::Forward => cur.checked_add(n).filter(|&i| i < self.items.len()),
+                Direction::Backward => cur.checked_sub(n),
+            })
+            .map(|i| ItemRef::of(&self.items[i]))
             .collect();
         Some(Effect::Show {
             current: ItemRef::of(self.items.get(cur)?),
@@ -202,8 +203,9 @@ pub enum Effect {
         change: MarkChange,
     },
     /// Display `current` as soon as possible and prefetch `prefetch` in order. Jobs for any
-    /// other item are stale and may be cancelled. `ahead` lists the prefetched items in the
-    /// travel direction, nearest first, so the loader can decode ahead of a held key (PERF-3).
+    /// other item are stale and may be cancelled. `ahead` lists up to
+    /// [`DECODE_AHEAD`] items in the travel direction, nearest first (the first ones are the
+    /// prefetch window's), so the loader can decode ahead of a held key (PERF-3).
     Show {
         current: ItemRef,
         prefetch: Vec<ItemRef>,
@@ -811,6 +813,33 @@ mod tests {
         assert!(ahead(&fx).is_empty(), "nothing ahead of the last item");
         let (_, fx) = reduce(&s, Action::Navigate(Nav::Prev));
         assert_eq!(ahead(&fx)[..3], ["17.ARW", "16.ARW", "15.ARW"]);
+    }
+
+    #[test]
+    fn req_perf_3_ahead_reaches_past_the_prefetch_window_for_slow_decodes() {
+        // A decode that takes 12 key repeats must start 12 items ahead, beyond the 8 prefetched.
+        let names: Vec<String> = (0..100).map(|i| format!("{i:03}.ARW")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (s, fx) = reduce(&opened(&names), Action::Navigate(Nav::Next));
+        let Some(Effect::Show {
+            ahead, prefetch, ..
+        }) = fx.first()
+        else {
+            panic!("{fx:?}")
+        };
+        assert_eq!(ahead.len(), crate::view::DECODE_AHEAD);
+        assert_eq!(ahead[0].path.file_name().unwrap(), "002.ARW");
+        assert_eq!(ahead[31].path.file_name().unwrap(), "033.ARW");
+        assert_eq!(
+            prefetch.len(),
+            9,
+            "the prefetch window stays 8 ahead (and 1 behind item 1)"
+        );
+        let (_, fx) = reduce(&s, Action::Navigate(Nav::Last));
+        let Some(Effect::Show { ahead, .. }) = fx.first() else {
+            panic!("{fx:?}")
+        };
+        assert!(ahead.is_empty());
     }
 
     #[test]

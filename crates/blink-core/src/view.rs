@@ -196,6 +196,12 @@ pub enum Direction {
     Backward,
 }
 
+/// How far [`Effect::Show`](crate::state::Effect::Show) lists items ahead for decode-ahead
+/// pacing (PERF-3): a held key on a slow machine passes more items during one decode than the
+/// prefetch window holds. These items are not prefetched; the loader decodes only the one the
+/// user reaches when a decode started now ends (ADR 0014).
+pub const DECODE_AHEAD: usize = 32;
+
 /// Prefetch window (SPEC §8.3): 8 ahead and 2 behind in the travel direction, nearest first,
 /// with the first item behind right after the first item ahead (cheap direction changes).
 pub fn prefetch_window(current: usize, len: usize, dir: Direction) -> Vec<usize> {
