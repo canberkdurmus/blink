@@ -36,9 +36,9 @@ jobs:
         with:
           path: corpus/cache
           key: corpus-${{ hashFiles('corpus/manifest.toml') }}
-      - name: Install lavapipe (wgpu software rendering for UI goldens)
+      - name: Install exiftool (oracle) and lavapipe (wgpu software rendering for UI goldens)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends mesa-vulkan-drivers
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends libimage-exiftool-perl mesa-vulkan-drivers
       - run: cargo xtask corpus fetch
       - run: cargo xtask verify --full
       # Targets without a recorded baseline only report (ADR 0008).
