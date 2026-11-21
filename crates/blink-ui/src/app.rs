@@ -214,6 +214,9 @@ impl BlinkApp {
         if let Ok(mut c) = self.full_current.lock() {
             c.clone_from(&current);
         }
+        // The builder drops requests for other items: forget them, so coming back asks again.
+        self.full_pending
+            .retain(|(p, _), _| Some(p) == current.as_ref());
         self.drawn = self
             .state
             .loupe
