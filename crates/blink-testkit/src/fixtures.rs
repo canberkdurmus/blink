@@ -267,21 +267,31 @@ pub fn perf_folder(n: usize) -> std::path::PathBuf {
         .join("target")
         .join("perf-fixtures")
         .join(format!("raw-{n}"));
-    let done = dir.join(".complete");
-    if done.exists() {
+    if dir.join(".complete").exists() {
         return dir;
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create perf folder");
+    // Several test processes may ask at once: each builds its own temp folder and renames it
+    // into place. A folder another process may be reading is never deleted.
+    let tmp = dir.with_file_name(format!("raw-{n}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create perf folder");
     let thumb = jpeg(&[128; 160 * 120 * 3], 160, 120, 80, None);
-    let src = dir.join("source.bin");
+    let src = tmp.join("source.bin");
     std::fs::write(&src, tiff_with_jpegs(&[thumb, perf_jpeg_6mb()])).expect("write perf file");
     for i in 0..n {
-        let p = dir.join(format!("IMG_{i:04}.ARW"));
+        let p = tmp.join(format!("IMG_{i:04}.ARW"));
         if std::fs::hard_link(&src, &p).is_err() {
             std::fs::copy(&src, &p).expect("copy perf file");
         }
     }
-    std::fs::write(&done, b"").expect("mark perf folder");
+    std::fs::write(tmp.join(".complete"), b"").expect("mark perf folder");
+    if std::fs::rename(&tmp, &dir).is_err() {
+        // Another process won the race (or a stale incomplete folder is in the way).
+        let _ = std::fs::remove_dir_all(&tmp);
+        if !dir.join(".complete").exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return perf_folder(n);
+        }
+    }
     dir
 }

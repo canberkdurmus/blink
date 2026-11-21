@@ -10,3 +10,15 @@ retries = 0
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# GUI perf tests measure wall time and share one fixture folder: run them one at a time.
+[test-groups]
+perf = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/full_perf::/)'
+test-group = 'perf'
+
+[[profile.ci.overrides]]
+filter = 'test(/full_perf::/)'
+test-group = 'perf'
