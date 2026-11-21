@@ -150,6 +150,15 @@ fn req_open_1_dropping_a_folder_or_file_opens_its_folder() {
 }
 
 #[test]
+fn req_open_1_a_relative_file_argument_opens_the_current_folder() {
+    // `blink IMG.ARW`: the parent of a bare file name is "", which must mean ".".
+    let mut h = harness(folder(1), false);
+    h.state_mut().open_path(Path::new("IMG_0001.ARW"));
+    h.step();
+    assert_eq!(h.state().state().folder.as_deref(), Some(Path::new(".")));
+}
+
+#[test]
 fn req_view_6_j_toggles_the_clipping_overlay_and_i_shows_the_labelled_histogram() {
     let mut h = harness(folder(1), true);
     settle(&mut h);

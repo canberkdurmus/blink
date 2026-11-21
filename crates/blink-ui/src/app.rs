@@ -237,7 +237,11 @@ impl BlinkApp {
         let folder = if is_dir {
             p.to_path_buf()
         } else {
-            p.parent().map(Path::to_path_buf).unwrap_or_default()
+            // A bare file name has the parent "": that is the current folder.
+            p.parent()
+                .filter(|q| !q.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
         };
         self.dispatch(Action::OpenFolder(folder));
     }
