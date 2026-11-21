@@ -61,6 +61,17 @@ JSON results. `cargo xtask bench` runs the standard scripts and compares with
     when a decode started now ends). Two step intervals without a move count as "stopped", and
     then a free worker takes the current item first. Local 4-core: **54.7 ms/item**; 16 threads
     unchanged (25.1 ms, the key-rate cap).
+  - **Decode-ahead past the prefetch window** (2026-11-21). The lead was capped at the 8 items
+    ahead that the prefetch window holds. A CI host where one decode takes > 8 key repeats
+    (> 200 ms) decoded only items the user had already passed when they ended, so almost nothing
+    was drawn. The same tree measured 104–120 ms/item on one runner and 274 ms on another
+    (main run 44901319504). Locally, 4 cores plus 4 busy loops gave 250–335 ms. `Effect::Show::ahead` now lists up to
+    `DECODE_AHEAD` = 32 items in the travel direction. The SPEC §8.3 prefetch window (8 ahead,
+    2 behind) is unchanged: items past it are only decoded as the lead item and the next 7
+    (`FAR_RUN`), and only while moves outpace decodes. `Pace` also counts a move of n items
+    in one frame (a delayed frame carrying several key repeats) as n steps, and a repeated
+    `Show` of the same item no longer ends the run. Local after the change: 4 cores 49–64,
+    2 cores 94–116, 4 cores with 4 busy loops 104–125, 16 threads 25.1 ms/item.
   - `Loader::clear()` (folder reopened) bumps an epoch: jobs started before it finish but never
     fill the cache or report, and don't count as "already running" for the next `Show`.
 
