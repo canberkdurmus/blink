@@ -4,6 +4,11 @@
 //!   preview first, then the prefetch window in order. A new `Show` replaces the queue and bumps
 //!   the generation; a job checks its generation (its cancellation token) before decoding, so
 //!   stale jobs are dropped.
+//! - **Pacing (PERF-3).** When moves come faster than a decode takes (a held arrow key on a
+//!   machine with few cores), decoding the new current item is wasted: the user has moved on
+//!   before it ends. The loader then starts with the item the user will reach when a decode
+//!   started now finishes ([`lead`]), so every finished decode is drawn. Once the moves stop
+//!   ([`Pace::settled`]), a free worker takes the current item first again.
 //! - Full-resolution loads (paired JPEG or RAW decode, VIEW-4) run on their own thread, newest
 //!   request wins, so a long RAW decode never delays previews.
 //! - Results are cached (L2, byte-limited LRU) together with a UI-specific prepared form `T`
@@ -29,6 +34,81 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+
+/// Move rate and decode time, measured by the loader to decode ahead of a held key (PERF-3).
+#[derive(Debug, Default)]
+struct Pace {
+    last_show: Option<std::time::Instant>,
+    /// The nearest item ahead at the last `Show`: arriving there is one more step.
+    next_ahead: Option<PathBuf>,
+    /// Smoothed seconds between steps; `None` when not moving steadily.
+    interval: Option<f64>,
+    /// Smoothed seconds per preview job (read, decode, prepare).
+    latency: Option<f64>,
+}
+
+fn smooth(old: Option<f64>, new: f64) -> f64 {
+    old.map_or(new, |o| 0.7 * o + 0.3 * new)
+}
+
+impl Pace {
+    fn shown(&mut self, current: &Path, next_ahead: Option<&ItemRef>, now: std::time::Instant) {
+        let step = self.next_ahead.as_deref() == Some(current);
+        self.interval = match (step, self.last_show) {
+            // A pause longer than a key repeat is not part of the same run.
+            (true, Some(t)) if now - t < std::time::Duration::from_millis(250) => {
+                Some(smooth(self.interval, (now - t).as_secs_f64()))
+            }
+            _ => None,
+        };
+        self.last_show = Some(now);
+        self.next_ahead = next_ahead.map(|a| a.path.clone());
+    }
+
+    /// No move for longer than two step intervals: the user stopped on the current item.
+    fn settled(&self, now: std::time::Instant) -> bool {
+        match (self.interval, self.last_show) {
+            (Some(i), Some(t)) => (now - t).as_secs_f64() > 2.0 * i,
+            _ => true,
+        }
+    }
+}
+
+/// How many items ahead to start decoding: 0 while decodes keep up with the moves, else the
+/// first item the user won't have passed when a decode started now ends (capped at `ahead`).
+fn lead(interval: Option<f64>, latency: Option<f64>, ahead: usize) -> usize {
+    match (interval, latency) {
+        (Some(i), Some(l)) if i > 0.0 && l > i => ((l / i).ceil() as usize).min(ahead),
+        _ => 0,
+    }
+}
+
+/// Job order for a `Show` with lead `k`: from the lead item on, then the current item, then
+/// the rest of the window in order.
+fn priority<'a>(
+    current: &'a ItemRef,
+    prefetch: &'a [ItemRef],
+    ahead: &'a [ItemRef],
+    k: usize,
+) -> Vec<&'a ItemRef> {
+    if k == 0 {
+        return std::iter::once(current).chain(prefetch).collect();
+    }
+    let far = &ahead[k - 1..];
+    far.iter()
+        .chain(std::iter::once(current))
+        .chain(prefetch.iter().filter(|p| !far.contains(p)))
+        .collect()
+}
+
+/// The next job: the queue's first, except that once the moves stopped (`settled_current` is
+/// the current item) the current item's job goes first, even behind lead items (PERF-3).
+fn next_job(jobs: &mut VecDeque<Job>, settled_current: Option<&Path>) -> Option<Job> {
+    let at = settled_current
+        .and_then(|c| jobs.iter().position(|j| j.item.path == c))
+        .unwrap_or(0);
+    jobs.remove(at)
+}
 
 /// Default L2 cache cap (PERF-8): 2 GB.
 pub const DEFAULT_CACHE_BYTES: usize = 2 << 30;
@@ -143,6 +223,7 @@ struct Shared<T> {
     full_cv: Condvar,
     cache: Mutex<Cache<T>>,
     generation: AtomicU64,
+    pace: Mutex<Pace>,
     /// Bumped by [`Loader::clear`]: results of jobs started before it are dropped.
     epoch: AtomicU64,
     /// Primary path of the current item (pinned in the cache, never cancelled).
@@ -206,6 +287,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
                 cap: cache_bytes,
             }),
             generation: AtomicU64::new(0),
+            pace: Mutex::new(Pace::default()),
             epoch: AtomicU64::new(0),
             current: Mutex::new(None),
             results: Mutex::new(tx),
@@ -238,6 +320,23 @@ impl<T: Send + Sync + 'static> Loader<T> {
     /// action at once when the current item's preview is cached, so the UI can show it in the
     /// same frame (PERF-2).
     pub fn show(&self, current: &ItemRef, prefetch: &[ItemRef]) -> Option<Action> {
+        self.show_ahead(current, prefetch, &[])
+    }
+
+    /// [`show`](Self::show) knowing which of `prefetch` lie ahead in the travel direction,
+    /// nearest first: while moves outpace decodes, decoding starts [`lead`] items ahead.
+    pub fn show_ahead(
+        &self,
+        current: &ItemRef,
+        prefetch: &[ItemRef],
+        ahead: &[ItemRef],
+    ) -> Option<Action> {
+        let k = {
+            let mut p = lock(&self.shared.pace);
+            p.shown(&current.path, ahead.first(), std::time::Instant::now());
+            lead(p.interval, p.latency, ahead.len())
+        };
+        let order = priority(current, prefetch, ahead, k);
         let g = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.shared.current) = Some(current.path.clone());
         let mut q = lock(&self.shared.queue);
@@ -246,7 +345,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
         let hit = cache.get(&(current.path.clone(), Level::Preview));
         let mut jobs = VecDeque::new();
         q.wanted.clear();
-        for item in std::iter::once(current).chain(prefetch) {
+        for item in order {
             q.wanted.insert(item.path.clone());
             let cached = cache.get(&(item.path.clone(), Level::Preview)).is_some();
             let running = q
@@ -283,7 +382,11 @@ impl<T: Send + Sync + 'static> Loader<T> {
     /// Execute a loading effect; other effects are not the loader's and return `None`.
     pub fn execute(&self, effect: &Effect) -> Option<Action> {
         match effect {
-            Effect::Show { current, prefetch } => self.show(current, prefetch),
+            Effect::Show {
+                current,
+                prefetch,
+                ahead,
+            } => self.show_ahead(current, prefetch, ahead),
             Effect::LoadFull { item } => self.load_full(item),
             _ => None,
         }
@@ -372,7 +475,9 @@ fn worker<T>(s: &Shared<T>) {
                 if q.shutdown {
                     return;
                 }
-                if let Some(j) = q.jobs.pop_front() {
+                let settled = lock(&s.pace).settled(std::time::Instant::now());
+                let cur = settled.then(|| lock(&s.current).clone()).flatten();
+                if let Some(j) = next_job(&mut q.jobs, cur.as_deref()) {
                     q.running.push((j.item.path.clone(), j.epoch));
                     // Share the cores between the jobs running now: an idle loader decodes
                     // the current item on all of them, a busy one doesn't oversubscribe.
@@ -383,7 +488,12 @@ fn worker<T>(s: &Shared<T>) {
             }
         };
         let (job, threads) = job;
+        let started = std::time::Instant::now();
         let result = load_preview(s, &job, threads);
+        if let Some(Ok(_)) = &result {
+            let mut p = lock(&s.pace);
+            p.latency = Some(smooth(p.latency, started.elapsed().as_secs_f64()));
+        }
         let leave = || {
             lock(&s.queue)
                 .running
@@ -598,4 +708,104 @@ fn load_full<T>(s: &Shared<T>, item: &ItemRef) -> Result<Loaded<T>, String> {
         (None, _) => return Err("no full-resolution source".into()),
     };
     Ok(finish_load(s, item, Level::Full, (preview, a), None))
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn item(n: usize) -> ItemRef {
+        ItemRef {
+            path: format!("/f/{n}.ARW").into(),
+            kind: FileKind::Raw,
+            paired_jpeg: None,
+        }
+    }
+
+    #[test]
+    fn req_perf_3_lead_is_zero_while_decodes_keep_up() {
+        assert_eq!(lead(None, Some(0.14), 8), 0, "not moving steadily");
+        assert_eq!(
+            lead(Some(0.2), Some(0.14), 8),
+            0,
+            "decode faster than the moves"
+        );
+        assert_eq!(lead(Some(0.025), None, 8), 0, "no decode measured yet");
+    }
+
+    #[test]
+    fn req_perf_3_lead_is_the_first_item_not_passed_when_a_decode_ends() {
+        assert_eq!(lead(Some(0.025), Some(0.14), 8), 6); // 5.6 items pass meanwhile
+        assert_eq!(lead(Some(0.025), Some(0.5), 8), 8, "capped at the window");
+        assert_eq!(lead(Some(0.025), Some(0.5), 0), 0);
+    }
+
+    #[test]
+    fn req_perf_3_lead_items_go_first_and_the_current_item_first_once_settled() {
+        let (cur, ahead) = (item(0), (1..=8).map(item).collect::<Vec<_>>());
+        let mut prefetch = vec![item(1), item(99)];
+        prefetch.extend((2..=8).map(item));
+        let names = |v: Vec<&ItemRef>| v.iter().map(|i| i.path.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(priority(&cur, &prefetch, &ahead, 0)),
+            names(std::iter::once(&cur).chain(&prefetch).collect())
+        );
+        let order = names(priority(&cur, &prefetch, &ahead, 6));
+        let want: Vec<PathBuf> = [6, 7, 8, 0, 1, 99, 2, 3, 4, 5]
+            .map(|n| item(n).path)
+            .to_vec();
+        assert_eq!(order, want);
+
+        let mut jobs: VecDeque<Job> = [6, 7, 0, 1]
+            .map(|n| Job {
+                item: item(n),
+                generation: 0,
+                epoch: 0,
+            })
+            .into();
+        let p = |j: Option<Job>| j.unwrap().item.path;
+        assert_eq!(p(next_job(&mut jobs, None)), item(6).path, "still moving");
+        assert_eq!(
+            p(next_job(&mut jobs, Some(&item(0).path))),
+            item(0).path,
+            "stopped"
+        );
+        assert_eq!(p(next_job(&mut jobs, Some(&item(0).path))), item(7).path);
+    }
+
+    #[test]
+    fn req_perf_3_steady_steps_measure_the_interval_and_a_stop_settles() {
+        let t0 = Instant::now();
+        let mut p = Pace::default();
+        p.shown(&item(0).path, Some(&item(1)), t0);
+        assert_eq!(p.interval, None);
+        for n in 1..=5 {
+            p.shown(
+                &item(n).path,
+                Some(&item(n + 1)),
+                t0 + Duration::from_millis(25 * n as u64),
+            );
+        }
+        let i = p.interval.unwrap();
+        assert!((i - 0.025).abs() < 1e-6, "{i}");
+        let last = t0 + Duration::from_millis(125);
+        assert!(!p.settled(last + Duration::from_millis(40)));
+        assert!(p.settled(last + Duration::from_millis(60)));
+        // A jump (not the next item ahead) ends the run.
+        p.shown(
+            &item(50).path,
+            Some(&item(51)),
+            last + Duration::from_millis(25),
+        );
+        assert_eq!(p.interval, None);
+        assert!(p.settled(last + Duration::from_millis(26)));
+        // So does a long pause.
+        p.shown(
+            &item(51).path,
+            Some(&item(52)),
+            last + Duration::from_millis(400),
+        );
+        assert_eq!(p.interval, None);
+    }
 }

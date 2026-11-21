@@ -52,6 +52,15 @@ JSON results. `cargo xtask bench` runs the standard scripts and compares with
     builder thread that holds requests weakly and builds only the newest request for the current
     item, so holding → at 100 % never runs several ~100 MB builds at once. While they build, the
     best complete variant stays on screen.
+  - **Decode-ahead pacing.** On a 4-core machine a held key moves 40 items/s, but 3 workers
+    decode ~21 items/s. Decoding each new current item first was wasted work: it ended after the
+    user had moved ~5 items on, so almost nothing was drawn (CI: 273 ms/item; `taskset -c 0-3`
+    locally: 215 ms/item). `Effect::Show` now lists the items `ahead` in the travel direction.
+    The loader smooths the step interval and the job time. While jobs take longer than a
+    step, it queues first the item `ceil(latency / interval)` ahead (the first one not passed
+    when a decode started now ends). Two step intervals without a move count as "stopped", and
+    then a free worker takes the current item first. Local 4-core: **54.7 ms/item**; 16 threads
+    unchanged (25.1 ms, the key-rate cap).
   - `Loader::clear()` (folder reopened) bumps an epoch: jobs started before it finish but never
     fill the cache or report, and don't count as "already running" for the next `Show`.
 

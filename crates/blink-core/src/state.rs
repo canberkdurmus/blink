@@ -93,12 +93,20 @@ impl State {
     /// The effect that shows the current item and prefetches its neighbours.
     fn show_effect(&self) -> Option<Effect> {
         let cur = self.current?;
+        let window = prefetch_window(cur, self.items.len(), self.direction);
+        let forward = self.direction == Direction::Forward;
+        let ahead = window
+            .iter()
+            .filter(|&&i| (i > cur) == forward)
+            .map(|&i| ItemRef::of(&self.items[i]))
+            .collect();
         Some(Effect::Show {
             current: ItemRef::of(self.items.get(cur)?),
-            prefetch: prefetch_window(cur, self.items.len(), self.direction)
+            prefetch: window
                 .into_iter()
                 .map(|i| ItemRef::of(&self.items[i]))
                 .collect(),
+            ahead,
         })
     }
 
@@ -194,10 +202,12 @@ pub enum Effect {
         change: MarkChange,
     },
     /// Display `current` as soon as possible and prefetch `prefetch` in order. Jobs for any
-    /// other item are stale and may be cancelled.
+    /// other item are stale and may be cancelled. `ahead` lists the prefetched items in the
+    /// travel direction, nearest first, so the loader can decode ahead of a held key (PERF-3).
     Show {
         current: ItemRef,
         prefetch: Vec<ItemRef>,
+        ahead: Vec<ItemRef>,
     },
     /// Load the full-resolution image of `item`: its paired JPEG if any, else a RAW decode.
     LoadFull {
@@ -585,7 +595,10 @@ mod tests {
                 files: scanned("/f", &["a.ARW", "b.ARW", "c.ARW"]),
             },
         );
-        let Some(Effect::Show { current, prefetch }) = fx.first() else {
+        let Some(Effect::Show {
+            current, prefetch, ..
+        }) = fx.first()
+        else {
             panic!("{fx:?}")
         };
         assert_eq!(current.path, Path::new("/f/a.ARW"));
@@ -765,6 +778,37 @@ mod tests {
             PreviewSource::EmbeddedLowRes,
             "the preview stays"
         );
+    }
+
+    #[test]
+    fn req_perf_3_show_lists_the_items_ahead_in_the_travel_direction_nearest_first() {
+        let names: Vec<String> = (0..20).map(|i| format!("{i:02}.ARW")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let s = opened(&names);
+        let ahead = |fx: &[Effect]| match fx.first() {
+            Some(Effect::Show {
+                ahead, prefetch, ..
+            }) => {
+                assert!(ahead.iter().all(|a| prefetch.contains(a)));
+                ahead
+                    .iter()
+                    .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        };
+        let (s, fx) = reduce(&s, Action::Navigate(Nav::Next));
+        let (s, fx) = (s, ahead(&fx));
+        assert_eq!(
+            fx,
+            [
+                "02.ARW", "03.ARW", "04.ARW", "05.ARW", "06.ARW", "07.ARW", "08.ARW", "09.ARW"
+            ]
+        );
+        let (s, fx) = reduce(&s, Action::Navigate(Nav::Last));
+        assert!(ahead(&fx).is_empty(), "nothing ahead of the last item");
+        let (_, fx) = reduce(&s, Action::Navigate(Nav::Prev));
+        assert_eq!(ahead(&fx)[..3], ["17.ARW", "16.ARW", "15.ARW"]);
     }
 
     #[test]
