@@ -152,20 +152,24 @@ fn is_ns(r: &ResolveResult<'_>, uri: &str) -> bool {
     matches!(r, ResolveResult::Bound(Namespace(ns)) if *ns == uri)
 }
 
-fn xmp_prefix(reader: &NsReader<&[u8]>) -> Result<String, String> {
+fn xmp_prefix(reader: &NsReader<&[u8]>, src: &[u8]) -> Result<String, String> {
     for p in ["xmp", "xap"] {
         let q = format!("{p}:x");
         if is_ns(&reader.resolver().resolve_attribute(QName(&q)).0, NS_XMP) {
             return Ok(p.to_string());
         }
     }
-    // Pick a prefix that is unbound here, so declaring it can't shadow a foreign binding.
+    // Pick a prefix that is unbound here and used nowhere in the file, so declaring it can
+    // neither shadow a foreign binding nor give an undeclared foreign use a meaning.
     for p in ["xmp", "xmpBlink", "xmpBlink2"] {
         let q = format!("{p}:x");
-        if matches!(
-            reader.resolver().resolve_attribute(QName(&q)).0,
-            ResolveResult::Unbound
-        ) {
+        let used = src.windows(p.len() + 1).any(|w| w == format!("{p}:").as_bytes());
+        if !used
+            && matches!(
+                reader.resolver().resolve_attribute(QName(&q)).0,
+                ResolveResult::Unknown(_) | ResolveResult::Unbound
+            )
+        {
             return Err(p.to_string());
         }
     }
@@ -182,7 +186,10 @@ pub fn write_owned(existing: Option<&[u8]>, edit: &OwnedEdit) -> Result<Vec<u8>,
     }) else {
         return Ok(new_sidecar(edit));
     };
-    let mut reader = NsReader::from_reader(src);
+    // quick-xml skips a leading BOM and reports positions after it: parse past the BOM and
+    // shift every position back into `src`.
+    let bom = if src.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+    let mut reader = NsReader::from_reader(&src[bom..]);
     reader.config_mut().check_end_names = true;
     let mut descs: Vec<Desc> = Vec::new();
     let mut elems: Vec<Elem> = Vec::new();
@@ -191,13 +198,13 @@ pub fn write_owned(existing: Option<&[u8]>, edit: &OwnedEdit) -> Result<Vec<u8>,
     let mut rdf: Option<(usize, usize, String, bool)> = None;
     let mut root_seen = false;
     loop {
-        let p0 = reader.buffer_position() as usize;
+        let p0 = reader.buffer_position() as usize + bom;
         let (ns, ev) = reader
             .read_resolved_event()
             .map_err(|e| XmpError(e.to_string()))?;
         let in_rdf = is_ns(&ns, NS_RDF);
         let in_xmp = is_ns(&ns, NS_XMP);
-        let p1 = reader.buffer_position() as usize;
+        let p1 = reader.buffer_position() as usize + bom;
         match ev {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 root_seen = true;
@@ -206,7 +213,7 @@ pub fn write_owned(existing: Option<&[u8]>, edit: &OwnedEdit) -> Result<Vec<u8>,
                 let local = local.as_ref();
                 let parent_is_desc = matches!(stack.last(), Some(Open::Desc));
                 let kind = if in_rdf && local == "Description" {
-                    descs.push(desc_of(&reader, e, p0, p1, empty)?);
+                    descs.push(desc_of(&reader, src, e, p0, p1, empty)?);
                     Open::Desc
                 } else if in_xmp
                     && parent_is_desc
@@ -329,6 +336,7 @@ pub fn write_owned(existing: Option<&[u8]>, edit: &OwnedEdit) -> Result<Vec<u8>,
 
 fn desc_of(
     reader: &NsReader<&[u8]>,
+    src: &[u8],
     e: &BytesStart<'_>,
     start: usize,
     end: usize,
@@ -363,7 +371,7 @@ fn desc_of(
         empty,
         attrs,
         sep,
-        xmp_prefix: xmp_prefix(reader),
+        xmp_prefix: xmp_prefix(reader, src),
     })
 }
 

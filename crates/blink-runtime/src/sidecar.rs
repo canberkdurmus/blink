@@ -66,10 +66,12 @@ pub fn adobe_path(source: &Path, ext: &str) -> PathBuf {
 
 /// darktable-style sidecar path: `IMG.ARW` → `IMG.ARW.xmp`.
 pub fn darktable_path(source: &Path, ext: &str) -> PathBuf {
-    let mut n = source.file_name().unwrap_or_default().to_os_string();
-    n.push(".");
-    n.push(ext);
-    source.with_file_name(n)
+    // Append to the whole path: `with_file_name` would re-join with the platform separator
+    // (`/f\a.ARW.xmp` on Windows).
+    let mut s = source.as_os_str().to_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
 }
 
 fn existing(fs: &dyn Fs, make: fn(&Path, &str) -> PathBuf, source: &Path) -> Option<PathBuf> {

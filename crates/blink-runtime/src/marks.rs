@@ -13,12 +13,12 @@ pub fn sidecar_candidates(source: &Path) -> Vec<PathBuf> {
     for ext in ["xmp", "XMP"] {
         out.push(source.with_extension(ext));
     }
-    if let Some(name) = source.file_name() {
+    if source.file_name().is_some() {
         for ext in ["xmp", "XMP"] {
-            let mut n = name.to_os_string();
+            let mut n = source.as_os_str().to_os_string();
             n.push(".");
             n.push(ext);
-            out.push(source.with_file_name(n));
+            out.push(PathBuf::from(n));
         }
     }
     out
