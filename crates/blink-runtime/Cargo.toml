@@ -14,8 +14,10 @@ workspace = true
 [dependencies]
 blink-core.workspace = true
 directories = "=6.0.0"
+toml = { version = "1", default-features = false, features = ["std", "parse"] }
 blink-decode = { path = "../blink-decode" }
 blink-xmp = { path = "../blink-xmp" }
 
 [dev-dependencies]
 blink-testkit = { path = "../blink-testkit" }
+proptest = "1"

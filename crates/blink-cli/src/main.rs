@@ -365,6 +365,8 @@ fn cmd_mark(
                     MarkChange::Rating(None) => "remove xmp:Rating".into(),
                     MarkChange::Label(Some(l)) => format!("set xmp:Label={l}"),
                     MarkChange::Label(None) => "remove xmp:Label".into(),
+                    MarkChange::RevertRating => "revert xmp:Rating".into(),
+                    MarkChange::RevertLabel => "revert xmp:Label".into(),
                 };
                 let _ = writeln!(
                     out,

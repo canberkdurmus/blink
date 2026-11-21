@@ -7,6 +7,21 @@ pub mod tiles;
 pub use app::{BlinkApp, Displayed, Options};
 use std::path::PathBuf;
 
+/// Options from the user's config file (RATE-2, D-3); problems with it become a toast.
+pub fn configured_options() -> Options {
+    let fs = blink_runtime::fs::RealFs;
+    let Some(paths) = blink_runtime::paths::AppPaths::for_current_exe(&fs) else {
+        return Options::default();
+    };
+    let (c, errs) = blink_runtime::config::Config::load(&fs, &paths.config_dir);
+    Options {
+        sidecar_style: c.sidecar_style,
+        marks: c.marks,
+        notice: (!errs.is_empty()).then(|| errs.join("; ")),
+        ..Options::default()
+    }
+}
+
 /// Run the GUI event loop.
 pub fn run(folder: Option<PathBuf>) -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -23,7 +38,7 @@ pub fn run(folder: Option<PathBuf>) -> eframe::Result {
             Ok(Box::new(BlinkApp::new(
                 &cc.egui_ctx,
                 folder,
-                Options::default(),
+                configured_options(),
             )))
         }),
     )

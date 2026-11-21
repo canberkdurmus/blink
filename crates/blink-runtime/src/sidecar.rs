@@ -106,12 +106,21 @@ pub fn sidecar_targets(
     }]
 }
 
+/// A queued change of one owned field.
+#[derive(Debug, Clone)]
+enum Want<T> {
+    /// Set (`Some`) or remove (`None`).
+    Value(Option<T>),
+    /// Back to the sidecar's value from before Blink first wrote it this session (RATE-3).
+    Original,
+}
+
 /// Changes waiting for the debounce, for one source file.
 #[derive(Debug, Clone)]
 struct Pending {
     owns_adobe_name: bool,
-    rating: Option<Option<i8>>,
-    label: Option<Option<String>>,
+    rating: Option<Want<i8>>,
+    label: Option<Want<String>>,
     since: Instant,
     /// Failed attempts so far (retries back off).
     attempts: u32,
@@ -198,8 +207,10 @@ impl<'a> SidecarWriter<'a> {
         });
         p.owns_adobe_name = owns_adobe_name;
         match change {
-            MarkChange::Rating(r) => p.rating = Some(r),
-            MarkChange::Label(l) => p.label = Some(l),
+            MarkChange::Rating(r) => p.rating = Some(Want::Value(r)),
+            MarkChange::Label(l) => p.label = Some(Want::Value(l)),
+            MarkChange::RevertRating => p.rating = Some(Want::Original),
+            MarkChange::RevertLabel => p.label = Some(Want::Original),
         }
     }
 
@@ -274,17 +285,28 @@ impl<'a> SidecarWriter<'a> {
             .entry(target.to_path_buf())
             .or_insert_with(|| current.clone())
             .clone();
+        // `Original` needs the field's value in the session's first version of this sidecar.
+        let original = if matches!(p.rating, Some(Want::Original))
+            || matches!(p.label, Some(Want::Original))
+        {
+            owned_of(base.as_deref()).ok_or("the original sidecar can't be parsed")?
+        } else {
+            Default::default()
+        };
+        fn edit<T: Clone>(w: &Option<Want<T>>, original: &Option<T>) -> Edit<T> {
+            let v = match w {
+                None => return Edit::Keep,
+                Some(Want::Value(v)) => v,
+                Some(Want::Original) => original,
+            };
+            match v {
+                Some(v) => Edit::Set(v.clone()),
+                None => Edit::Remove,
+            }
+        }
         let edit = OwnedEdit {
-            rating: match p.rating {
-                None => Edit::Keep,
-                Some(Some(r)) => Edit::Set(r),
-                Some(None) => Edit::Remove,
-            },
-            label: match &p.label {
-                None => Edit::Keep,
-                Some(Some(l)) => Edit::Set(l.clone()),
-                Some(None) => Edit::Remove,
-            },
+            rating: edit(&p.rating, &original.rating),
+            label: edit(&p.label, &original.label),
             metadata_date: blink_xmp::iso8601_utc(self.clock.unix_secs()),
         };
         let new = blink_xmp::write_owned(current.as_deref(), &edit).map_err(|e| e.to_string())?;
