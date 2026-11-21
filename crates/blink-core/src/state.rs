@@ -94,22 +94,27 @@ pub enum MarkKey {
     Label(LabelColor),
 }
 
-/// One undoable change of one item's marks (RATE-3). `before` and `after` differ in exactly one
-/// field.
+/// One undoable change of one field of one item's marks (RATE-3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkEdit {
     /// Primary path of the item.
     pub path: PathBuf,
+    /// `true`: the edit changed the rating; `false`: the label. (`before` and `after` may
+    /// become equal when marks load after the edit, so this isn't derived from them.)
+    pub rating: bool,
     pub before: Marks,
     pub after: Marks,
     /// `before` is the value the item had when the session started (no earlier edit touched the
     /// field): undo then reverts every member's sidecar to its own original bytes.
     pub before_original: bool,
+    /// The sidecar writes of the edit (each member's source and `owns_adobe_name`), kept so
+    /// undo/redo reach the same sidecars even when a rescan dropped the item.
+    pub targets: Vec<(PathBuf, bool)>,
 }
 
 impl MarkEdit {
     fn rating_changed(&self) -> bool {
-        self.before.rating != self.after.rating
+        self.rating
     }
 }
 
@@ -286,13 +291,27 @@ impl State {
             } else {
                 MarkChange::Label(after.label.clone())
             };
-            fx.extend(sidecar_writes(&self.items, item, &change));
+            let writes = sidecar_writes(&self.items, item, &change);
+            let targets = writes
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::WriteSidecar {
+                        source,
+                        owns_adobe_name,
+                        ..
+                    } => Some((source.clone(), *owns_adobe_name)),
+                    _ => None,
+                })
+                .collect();
+            fx.extend(writes);
             let before_original = !self.touched(&path, rating);
             self.undo.push(MarkEdit {
                 path: path.clone(),
+                rating,
                 before: before.clone(),
                 after: after.clone(),
                 before_original,
+                targets,
             });
             self.redo.clear();
             self.marks.insert(path.clone(), after.clone());
@@ -327,8 +346,16 @@ impl State {
             (true, false) => MarkChange::Rating(target.rating),
             (false, false) => MarkChange::Label(target.label.clone()),
         };
+        fx.extend(
+            edit.targets
+                .iter()
+                .map(|(source, owns_adobe_name)| Effect::WriteSidecar {
+                    source: source.clone(),
+                    change: change.clone(),
+                    owns_adobe_name: *owns_adobe_name,
+                }),
+        );
         if let Some(idx) = self.items.iter().position(|i| i.primary.path == edit.path) {
-            fx.extend(sidecar_writes(&self.items, idx, &change));
             self.go_to(idx, fx);
         }
         let m = self.marks.entry(edit.path.clone()).or_default();
@@ -685,6 +712,17 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
         Action::MarksLoaded(list) => {
             // Loading runs off-thread: a field the user already set wins over the file's value.
             for (path, m) in list {
+                // An edit made before the load recorded "nothing" as the original value: it
+                // is the file's (undo then shows what the revert puts back on disk).
+                for ed in s.undo.iter_mut().chain(s.redo.iter_mut()) {
+                    if ed.path == path && ed.before_original {
+                        if ed.rating_changed() {
+                            ed.before.rating = ed.before.rating.or(m.rating);
+                        } else {
+                            ed.before.label = ed.before.label.take().or(m.label.clone());
+                        }
+                    }
+                }
                 let e = s.marks.entry(path).or_default();
                 e.rating = e.rating.or(m.rating);
                 e.label = e.label.take().or(m.label);
@@ -1423,5 +1461,43 @@ mod tests {
         // Opening a folder starts a new history.
         let (s, _) = reduce(&s, Action::OpenFolder("/g".into()));
         assert!(s.undo.is_empty() && s.redo.is_empty());
+    }
+
+    #[test]
+    fn req_rate_3_undo_of_a_mark_set_before_the_marks_loaded_shows_the_files_value() {
+        let s = opened(&["a.ARW"]);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Stars(4)));
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![(
+                "/f/a.ARW".into(),
+                Marks {
+                    rating: Some(2),
+                    label: Some("Red".into()),
+                },
+            )]),
+        );
+        assert_eq!(rating_of(&s, "/f/a.ARW"), Some(4));
+        let (s, fx) = reduce(&s, Action::Undo);
+        assert_eq!(writes(&fx), [("/f/a.ARW".into(), MarkChange::RevertRating)]);
+        assert_eq!(rating_of(&s, "/f/a.ARW"), Some(2));
+        assert_eq!(label_of(&s, "/f/a.ARW").as_deref(), Some("Red"));
+    }
+
+    #[test]
+    fn req_rate_3_undo_reaches_items_a_rescan_dropped() {
+        let s = opened(&["a.ARW", "b.ARW"]);
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Stars(3)));
+        let (s, _) = reduce(
+            &s,
+            Action::FolderScanned {
+                folder: "/f".into(),
+                recursive: false,
+                files: scanned("/f", &["a.ARW"]),
+            },
+        );
+        let (_, fx) = reduce(&s, Action::Undo);
+        assert_eq!(writes(&fx), [("/f/b.ARW".into(), MarkChange::RevertRating)]);
     }
 }

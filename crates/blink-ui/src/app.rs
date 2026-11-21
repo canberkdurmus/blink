@@ -422,16 +422,13 @@ impl BlinkApp {
                 _ if plain && m.shift && digit == Key::Num9 => {
                     mark(MarkKey::Label(LabelColor::Purple))
                 }
-                Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5
-                    if plain && !m.shift =>
-                {
-                    let n = key.name().parse::<u8>().unwrap_or(0);
-                    mark(MarkKey::Stars(n))
+                _ if plain && digit_value(digit).is_some_and(|d| d <= 5) && !m.shift => {
+                    mark(MarkKey::Stars(digit_value(digit).unwrap_or(0)))
                 }
-                Key::Num6 if plain && !m.shift => mark(MarkKey::Label(LabelColor::Red)),
-                Key::Num7 if plain && !m.shift => mark(MarkKey::Label(LabelColor::Yellow)),
-                Key::Num8 if plain && !m.shift => mark(MarkKey::Label(LabelColor::Green)),
-                Key::Num9 if plain && !m.shift => mark(MarkKey::Label(LabelColor::Blue)),
+                _ if plain && !m.shift && digit_value(digit).is_some() => {
+                    let c = digit_value(digit).unwrap_or(6) as usize - 6;
+                    mark(MarkKey::Label(LabelColor::ALL[c]))
+                }
                 Key::P if plain => mark(MarkKey::Pick),
                 Key::X if plain => mark(MarkKey::Reject),
                 Key::U if plain => mark(MarkKey::Unflag),
@@ -937,6 +934,25 @@ struct Overlay {
     rejected: bool,
     /// Stored label and the colour it names (configured names, SPEC §6).
     label: Option<(String, Option<LabelColor>)>,
+}
+
+/// `0`–`9` of a (physical) digit key.
+fn digit_value(k: Key) -> Option<u8> {
+    let n = [
+        Key::Num0,
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ]
+    .iter()
+    .position(|&d| d == k)?;
+    Some(n as u8)
 }
 
 /// Swatch colour of a label.

@@ -21,8 +21,9 @@ RATE-1, RATE-2 and RATE-3 (M3) add the mark keys of SPEC §5.2, the configurable
 1. **Keys** (`Action::Mark(MarkKey)`, current item): `0`–`5` set the stars. `P` sets the pick value,
    `X` sets −1. `U` sets 0 when the rating is the pick value or −1, and otherwise does nothing.
    `6`–`9` and `Shift+9` set a label. **A label key on an item that already has that label clears
-   it** (that is how Lightroom and darktable toggle labels), so each label stays one key. Matching
-   uses the physical key, so `Shift+9` is purple whatever the layout makes of it. Key repeats
+   it** (that is how Lightroom and darktable toggle labels), so each label stays one key. Digits
+   match on the physical key (the logical key is the fallback), so they sit in the same place on
+   every layout and `Shift+9` is purple whatever the layout makes of it. Key repeats
    are ignored for mark keys. `0` on an unrated item changes nothing, because "no rating" already
    means 0 in XMP. `Shift+A` toggles auto-advance: after a mark key, Blink moves to the next item
    (it stays on the last one). Remapping comes with KEY-1 (M5).
@@ -35,12 +36,16 @@ RATE-1, RATE-2 and RATE-3 (M3) add the mark keys of SPEC §5.2, the configurable
    name are rejected, because they couldn't be told apart when read back. The CLI keeps the D-2/D-3
    defaults and its `--style` flag, so its output depends only on its arguments.
    **Dependency**: `toml` 1 (MIT/Apache-2.0, already used by dev tooling, and needed by KEY-1's
-   TOML keymaps anyway) becomes a runtime dependency of `blink-runtime`, with default features off
+   TOML keymaps anyway; maintained by the toml-rs project, with frequent releases) becomes a runtime dependency of `blink-runtime`, with default features off
    and `std` + `parse` on. That means no serde and no derive: the file is read as a `toml::Table`.
 4. **Undo history** (`State::undo` / `State::redo`, in the pure reducer): each mark change is one
    `MarkEdit` (item primary path, the marks before and after, one field changed). There is no
-   limit on its length. A new edit clears the redo stack. Undo and redo write every member's
-   sidecar and move the view to that item. When an undo takes a field back to the value it had
+   limit on its length. A new edit clears the redo stack. Each edit keeps its write targets (every member's
+   source and `owns_adobe_name`). Undo and redo write those same sidecars, even when a rescan
+   (recursive toggle, a file moved away) dropped the item, and move the view to the item if it
+   is still listed. An edit made before the item's marks finished loading recorded "nothing" as
+   its original value. `MarksLoaded` fills that in, so after the undo the view shows what the
+   revert puts back on disk. When an undo takes a field back to the value it had
    at session start (no earlier edit in the history touched it), the reducer emits
    `MarkChange::RevertRating` / `RevertLabel` instead of a value. The writer then sets each
    sidecar's field to that sidecar's own value from before Blink first wrote it. ADR 0015 §7's

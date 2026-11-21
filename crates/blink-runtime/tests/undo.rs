@@ -9,7 +9,7 @@ use blink_runtime::sidecar::{Clock, DEBOUNCE, SidecarStyle, SidecarWriter};
 use blink_testkit::sidecars;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,10 @@ fn folder() -> MemFs {
         "/f/h.xmp",
         sidecars::lightroom(2, None).replace("=\"2\"", "=\"9\""),
     );
+    // A subfolder, seen only while recursive scanning is on: a rescan drops its items.
+    fs.add_file("/f/sub/s.ARW", b"raw bytes".to_vec());
+    fs.add_file("/f/sub/s.xmp", sidecars::lightroom(4, Some("Green")));
+    fs.add_file("/f/sub/t.ARW", b"raw bytes".to_vec());
     fs
 }
 
@@ -80,11 +84,13 @@ fn step() -> impl Strategy<Value = Step> {
         2 => Just(Step::Do(Action::Undo)),
         1 => Just(Step::Do(Action::Redo)),
         1 => Just(Step::Do(Action::ToggleAutoAdvance)),
+        1 => any::<bool>().prop_map(|on| Step::Do(Action::SetRecursive(on))),
         2 => (0u64..300).prop_map(Step::Wait),
     ]
 }
 
 struct Session<'a> {
+    fs: &'a MemFs,
     state: State,
     writer: SidecarWriter<'a>,
     now: Instant,
@@ -95,13 +101,25 @@ impl Session<'_> {
         let (s, fx) = reduce(&self.state, a);
         self.state = s;
         for e in fx {
-            if let Effect::WriteSidecar {
-                source,
-                change,
-                owns_adobe_name,
-            } = e
-            {
-                self.writer.queue(source, change, owns_adobe_name, self.now);
+            match e {
+                Effect::WriteSidecar {
+                    source,
+                    change,
+                    owns_adobe_name,
+                } => self.writer.queue(source, change, owns_adobe_name, self.now),
+                // Scan and load marks the way the GUI does (the load sees what's on disk now).
+                Effect::ScanFolder { folder, recursive } => {
+                    let files =
+                        blink_runtime::scan::scan_folder(self.fs, &folder, recursive).unwrap();
+                    self.dispatch(Action::FolderScanned {
+                        folder,
+                        recursive,
+                        files,
+                    });
+                    let marks = blink_runtime::marks::load_marks(self.fs, &self.state.items);
+                    self.dispatch(Action::MarksLoaded(marks));
+                }
+                _ => {}
             }
         }
     }
@@ -117,23 +135,14 @@ impl Session<'_> {
 fn open<'a>(fs: &'a MemFs, clock: &'a Ticking, style: SidecarStyle, pick: i8) -> Session<'a> {
     let mut state = State::new(Formats::new(["arw", "nef"]));
     state.prefs.pick_value = pick;
-    let (state, _) = reduce(&state, Action::OpenFolder("/f".into()));
-    let files = blink_runtime::scan::scan_folder(fs, Path::new("/f"), false).unwrap();
-    let (state, _) = reduce(
-        &state,
-        Action::FolderScanned {
-            folder: "/f".into(),
-            recursive: false,
-            files,
-        },
-    );
-    let marks = blink_runtime::marks::load_marks(fs, &state.items);
-    let (state, _) = reduce(&state, Action::MarksLoaded(marks));
-    Session {
+    let mut s = Session {
+        fs,
         state,
         writer: SidecarWriter::new(fs, clock, style),
         now: Instant::now(),
-    }
+    };
+    s.dispatch(Action::OpenFolder("/f".into()));
+    s
 }
 
 fn undo_all_restores_every_sidecar(steps: &[Step], style: SidecarStyle, pick: i8) {
@@ -156,7 +165,14 @@ fn undo_all_restores_every_sidecar(steps: &[Step], style: SidecarStyle, pick: i8
     for r in s.writer.flush_all() {
         r.result.unwrap();
     }
-    assert_eq!(snapshot(&fs), before);
+    let after = snapshot(&fs);
+    let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    for k in keys {
+        let text = |m: &BTreeMap<PathBuf, Vec<u8>>| {
+            m.get(k).map(|b| String::from_utf8_lossy(b).into_owned())
+        };
+        assert_eq!(text(&after), text(&before), "{} differs", k.display());
+    }
 }
 
 proptest! {
