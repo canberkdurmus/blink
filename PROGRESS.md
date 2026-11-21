@@ -1,16 +1,18 @@
 # Progress
 
-Current milestone: M2
+Current milestone: M3
 
 Ticked IDs list their tests. `cargo xtask trace` requires every ticked ID and every ID of earlier
 milestones to have a tagged, passing test.
 
 ## Next up
 
-M1 closed (gate report `docs/reports/M1.md`, pre-release `v1.0.0-m1`). **M2 Loupe and speed** starts
-with **VIEW-1**: GUI open entry points (drop, dialog, `blink [folder]`) from ADR 0010 plus the loupe
-in `crates/blink-app`. Then VIEW-4 (needs VIEW-2), VIEW-6, VIEW-9, and PERF-1/2/3/5 with
-`perf/scripts/*.json` bench scripts (see the `xtask/src/bench.rs` header).
+M2 closed (gate report `docs/reports/M2.md`, pre-release `v1.0.0-m2`). **M3 Ratings and sidecars**
+starts with **FILE-4** (atomic sidecar writes through `Fs`, `blink-runtime`), which unblocks RATE-1/2/3
+(rating, label and reject keys in `blink-core` reducer + UI) and OPEN-2's on-disk per-member sidecars and
+CLI `rate`/`label` without `--dry-run` (ADR 0010). Then FILE-5..9 and PERF-7 (bench script for
+rating key → durable sidecar). The gate also needs the exiftool oracle, crash injection and two
+green nightly darktable interop runs in a row (SPEC §13).
 
 ## M0 Foundations (infrastructure)
 
@@ -91,3 +93,4 @@ in `crates/blink-app`. Then VIEW-4 (needs VIEW-2), VIEW-6, VIEW-9, and PERF-1/2/
 - 2026-11-17 · M0 closed · workspace, xtask, 4 workflows green on 6 targets, .claude setup, v0.0.1-m0, ADRs 0001–0005
 - 2026-11-19 · OPEN-1, OPEN-2, OPEN-4, VIEW-2, VIEW-3, VIEW-7, VIEW-8, VIEW-10, RATE-4, CLI-1, CLI-2 closed (#6–#9) · PERF-4 blocked (serial Huffman floor ~55 ms); parallel decoder prototype under way
 - 2026-11-20 · PERF-4 closed (#10), M1 gate passed · parallel JPEG decoder (ADR 0011), bench writes results.md (#11), v1.0.0-m1
+- 2026-11-21 · VIEW-1, VIEW-4, VIEW-6, VIEW-9, PERF-1, PERF-2, PERF-3, PERF-5 closed (#14, #15), M2 gate passed · OPEN-1 relative-path fix, PERF-3 decode-ahead past the prefetch window, v1.0.0-m2
