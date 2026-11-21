@@ -28,7 +28,7 @@ green nightly darktable interop runs in a row (SPEC §13).
 ## M1 Headless core
 
 - [x] OPEN-1 — `req_open_1_corpus_item_list_equals_filtered_directory_listing`, `req_open_1_non_recursive_lists_only_the_folder`, `req_open_1_open_folder_is_non_recursive_by_default_and_toggle_rescans`, `req_open_1_recursive_does_not_follow_directory_links`, `req_open_1_recursive_scan_terminates_on_a_real_symlink_loop`, `req_open_1_recursive_skips_hidden_and_rejected`, `req_open_1_scan_only_reads_directories` (#8) · GUI entry points (drop, dialog, `blink [folder]`): `req_open_1_dropping_a_folder_or_file_opens_its_folder`, `req_open_1_a_relative_file_argument_opens_the_current_folder`, `req_view_1_command_line_folder_opens_in_the_loupe_fit_with_the_embedded_preview` (#14, ADR 0013)
-- [x] OPEN-2 — `req_open_2_label_applies_to_every_pair_member_and_only_the_label_changes`, `req_open_2_n_pairs_show_as_n_items`, `req_open_2_pairing_rules`, `req_open_2_pairs_only_within_the_same_folder`, `req_open_2_rating_applies_to_every_pair_member` (#8, #9) · on-disk sidecar per member completes with FILE-4 in M3 (ADR 0010)
+- [x] OPEN-2 — `req_open_2_label_applies_to_every_pair_member_and_only_the_label_changes`, `req_open_2_n_pairs_show_as_n_items`, `req_open_2_pairing_rules`, `req_open_2_pairs_only_within_the_same_folder`, `req_open_2_rating_applies_to_every_pair_member` (#8, #9) · on-disk sidecar per member: `req_open_2_req_file_4_every_pair_member_gets_its_own_sidecar_with_the_same_values` (#16)
 - [x] OPEN-4 — `req_open_4_classifies_by_extension_case_insensitively`, `req_open_4_doctor_lists_format_support`, `req_open_4_every_corpus_file_is_a_supported_raw_format` (#6, #9)
 - [x] VIEW-2 — `req_view_2_largest_of_several_embedded_previews_is_chosen`, `req_view_2_largest_preview_chosen_per_camera`, `req_view_2_low_res_threshold_is_half_the_sensor_long_edge` (#6)
 - [x] VIEW-3 — `req_view_3_badge_matches_corpus_and_preview_decodes`, `req_view_3_badge_texts` (#6)
@@ -57,12 +57,12 @@ green nightly darktable interop runs in a row (SPEC §13).
 - [ ] RATE-1
 - [ ] RATE-2
 - [ ] RATE-3
-- [ ] FILE-4
-- [ ] FILE-5
-- [ ] FILE-6
-- [ ] FILE-7
+- [x] FILE-4 — `req_file_4_fixture_matrix`, `req_file_4_unpaired_same_stem_files_never_share_a_sidecar`, `req_open_2_req_file_4_every_pair_member_gets_its_own_sidecar_with_the_same_values` (#16, ADR 0015)
+- [x] FILE-5 — `req_file_5_generated_foreign_xmp_is_preserved` (property), `req_file_5_app_sidecars_keep_every_foreign_field`, `req_file_5_bytes_outside_owned_fields_are_untouched`, `req_file_5_keeps_attribute_or_element_form_per_field`, `req_file_5_a_foreign_xmp_prefix_is_not_shadowed`, `req_file_5_a_leading_bom_is_kept_and_positions_stay_right`, `req_file_5_another_apps_later_changes_are_never_restored_over`, `req_file_5_req_file_9_req_rate_1_exiftool_reads_written_sidecars` (oracle) (#16)
+- [x] FILE-6 — `req_file_6_crash_at_every_step_leaves_the_old_or_the_new_sidecar`, `req_file_6_crash_while_updating_both_styles_leaves_each_old_or_new`, `req_file_6_the_memfs_model_catches_a_writer_that_skips_fsync`, `req_file_6_write_is_temp_fsync_rename_fsync_dir_in_the_same_directory`, `req_file_6_rating_writes_are_debounced_and_coalesced_within_250_ms`, `req_file_6_real_fs_atomic_write_replaces_and_leaves_no_temp_file`, `req_file_6_failed_writes_back_off` (#16, green on all 6 targets: run 44911226524)
+- [x] FILE-7 — `req_file_7_a_full_session_leaves_every_source_file_byte_identical`, `req_file_7_writes_only_ever_touch_sidecars` (#16)
 - [ ] FILE-8
-- [ ] FILE-9
+- [x] FILE-9 — `req_file_9_metadata_date_is_written_on_every_change`, `req_file_9_every_write_sets_metadata_date` (#16)
 - [ ] PERF-7
 
 ## M4 Grid, filters, files
