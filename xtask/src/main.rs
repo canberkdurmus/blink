@@ -8,11 +8,13 @@
 //! - `bench`             run perf scripts and compare with `perf/baseline-<target>.json`
 //! - `report Mn`         generate `docs/reports/Mn.md`
 //! - `guard --base REF`  CI guard checks for goldens/baselines and removed/ignored tests
+//! - `interop`           darktable reads the sidecars Blink writes (Linux, nightly)
 
 mod bench;
 mod corpus;
 mod fixtures;
 mod guard;
+mod interop;
 mod report;
 mod spec;
 mod trace;
@@ -36,6 +38,7 @@ fn main() -> ExitCode {
         ["bench", "--allow-missing-baseline"] => bench::run(true),
         ["report", m] => report::run(m),
         ["guard", "--base", base] => guard::run(base),
+        ["interop"] => interop::run(),
         _ => Err(USAGE.to_string()),
     };
     match res {
@@ -47,7 +50,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench [--allow-missing-baseline] | report Mn | guard --base REF>";
+const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench [--allow-missing-baseline] | report Mn | guard --base REF | interop>";
 
 /// Workspace root (parent of the xtask crate).
 pub fn root() -> PathBuf {
