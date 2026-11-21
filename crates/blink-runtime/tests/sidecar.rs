@@ -701,7 +701,7 @@ fn req_file_5_another_apps_later_changes_are_never_restored_over() {
     fs.add_file("/f/a.ARW", b"raw".to_vec());
     fs.add_file("/f/a.xmp", sidecars::lightroom(2, None));
     let mut w = SidecarWriter::new(&fs, &clock, SidecarStyle::Adobe);
-    let mut rate = |w: &mut SidecarWriter, r| {
+    let rate = |w: &mut SidecarWriter, r| {
         w.queue(
             "/f/a.ARW".into(),
             MarkChange::Rating(r),
