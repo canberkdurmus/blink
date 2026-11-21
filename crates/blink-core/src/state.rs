@@ -181,6 +181,11 @@ pub enum Action {
         size: (u32, u32),
         full_size: (u32, u32),
     },
+    /// Writing the sidecar of `source` failed (FILE-6); the change stays queued for a retry.
+    SidecarWriteFailed {
+        source: PathBuf,
+        error: String,
+    },
     /// Loading failed.
     ImageFailed {
         path: PathBuf,
@@ -198,9 +203,13 @@ pub enum Effect {
     },
     /// Apply `change` to the sidecar of `source` (sidecar naming: FILE-4). Only the changed
     /// field is carried, so a writer never clears a field it wasn't asked to touch.
+    /// `owns_adobe_name`: the Adobe-style name `stem.xmp` belongs to this file alone. It doesn't
+    /// for the JPEG/HEIF companions of a pair (the RAW owns it) or for same-stem files that
+    /// didn't pair; those use the darktable-style `name.ext.xmp` (ADR 0015).
     WriteSidecar {
         source: PathBuf,
         change: MarkChange,
+        owns_adobe_name: bool,
     },
     /// Display `current` as soon as possible and prefetch `prefetch` in order. Jobs for any
     /// other item are stale and may be cancelled. `ahead` lists up to
@@ -220,10 +229,41 @@ pub enum Effect {
 /// One field change for a sidecar write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkChange {
-    /// Set `xmp:Rating` (−1…5).
-    Rating(i8),
+    /// Set `xmp:Rating` (−1…5); `None` removes it (undo back to "no rating").
+    Rating(Option<i8>),
     /// Set `xmp:Label` (`None` removes it).
     Label(Option<String>),
+}
+
+/// Folder and lower-cased stem: files that share it share the Adobe-style sidecar name.
+fn stem_of(p: &std::path::Path) -> (Option<&std::path::Path>, String) {
+    (
+        p.parent(),
+        p.file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default(),
+    )
+}
+
+/// One [`Effect::WriteSidecar`] per member of `items[item]` (OPEN-2).
+fn sidecar_writes(items: &[Item], item: usize, change: &MarkChange) -> Vec<Effect> {
+    let Some(it) = items.get(item) else {
+        return Vec::new();
+    };
+    let stem = stem_of(&it.primary.path);
+    // Another item with the same stem (an unpaired same-stem file) shares `stem.xmp`.
+    let shared = items
+        .iter()
+        .enumerate()
+        .any(|(i, o)| i != item && o.members().any(|m| stem_of(&m.path) == stem));
+    it.members()
+        .enumerate()
+        .map(|(k, m)| Effect::WriteSidecar {
+            source: m.path.clone(),
+            change: change.clone(),
+            owns_adobe_name: k == 0 && !shared,
+        })
+        .collect()
 }
 
 /// The pure reducer.
@@ -376,6 +416,13 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 }
             }
         }
+        Action::SidecarWriteFailed { source, error } => {
+            let name = source
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            s.toast = Some(format!("Could not write the sidecar of {name}: {error}"));
+        }
         Action::MarksLoaded(list) => {
             // Loading runs off-thread: a field the user already set wins over the file's value.
             for (path, m) in list {
@@ -391,24 +438,22 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 let key = it.primary.path.clone();
                 let mut m = s.marks.get(&key).cloned().unwrap_or_default();
                 m.rating = Some(rating);
-                for member in it.members() {
-                    fx.push(Effect::WriteSidecar {
-                        source: member.path.clone(),
-                        change: MarkChange::Rating(rating),
-                    });
-                }
+                fx.extend(sidecar_writes(
+                    &s.items,
+                    item,
+                    &MarkChange::Rating(Some(rating)),
+                ));
                 s.marks.insert(key, m);
             }
         }
         Action::SetLabel { item, label } => {
             if let Some(it) = s.items.get(item) {
                 let key = it.primary.path.clone();
-                for member in it.members() {
-                    fx.push(Effect::WriteSidecar {
-                        source: member.path.clone(),
-                        change: MarkChange::Label(label.clone()),
-                    });
-                }
+                fx.extend(sidecar_writes(
+                    &s.items,
+                    item,
+                    &MarkChange::Label(label.clone()),
+                ));
                 s.marks.entry(key).or_default().label = label;
             }
         }
@@ -492,7 +537,8 @@ mod tests {
                 .iter()
                 .map(|p| Effect::WriteSidecar {
                     source: p.into(),
-                    change: MarkChange::Rating(3)
+                    change: MarkChange::Rating(Some(3)),
+                    owns_adobe_name: *p == "/f/a.ARW",
                 })
                 .collect::<Vec<_>>()
         );
@@ -547,7 +593,8 @@ mod tests {
                 .iter()
                 .map(|p| Effect::WriteSidecar {
                     source: p.into(),
-                    change: MarkChange::Label(Some("Blue".into()))
+                    change: MarkChange::Label(Some("Blue".into())),
+                    owns_adobe_name: *p == "/f/a.ARW",
                 })
                 .collect::<Vec<_>>()
         );

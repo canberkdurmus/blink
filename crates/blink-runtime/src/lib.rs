@@ -2,12 +2,14 @@
 //!
 //! All file-system access goes through the [`fs::Fs`] trait.
 
+pub mod atomic;
 pub mod fs;
 pub mod inspect;
 pub mod loader;
 pub mod marks;
 pub mod paths;
 pub mod scan;
+pub mod sidecar;
 
 /// Version string shared by the GUI and CLI.
 pub fn version() -> &'static str {

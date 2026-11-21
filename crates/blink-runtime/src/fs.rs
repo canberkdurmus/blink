@@ -1,8 +1,12 @@
 //! The file-system boundary (SPEC §8.1). Every code path that touches files goes through [`Fs`],
 //! so tests can use [`MemFs`], an in-memory file system that records every call.
 //!
-//! M1 needs read access only. Write operations (atomic sidecar writes, moves, trash) are added
-//! with the IDs that need them (FILE-*); none of them will ever unlink a source file.
+//! Writes are the primitives of an atomic sidecar write (FILE-6, [`crate::atomic`]): create a new
+//! file, fsync it, rename it over the target, fsync the directory. `remove_file` exists only for
+//! Blink's own temp files and for sidecars an undo takes back; it is never called on a source file
+//! (FILE-1, FILE-7).
+//!
+//! [`MemFs`] can fail any write step and simulate a power loss, for crash injection (FILE-6).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -39,6 +43,35 @@ pub trait Fs: Send + Sync {
     fn exists(&self, path: &Path) -> bool {
         self.metadata(path).is_ok()
     }
+    // Writes. The defaults make a read-only file system (test wrappers that only read).
+
+    /// Create `path` (it must not exist) holding `bytes`. Not durable until [`Fs::sync_file`].
+    fn write_new(&self, path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(read_only(path))
+    }
+    /// Flush a file's data to stable storage.
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        Err(read_only(path))
+    }
+    /// Rename `from` to `to`, atomically replacing `to` if it exists.
+    fn rename(&self, from: &Path, _to: &Path) -> io::Result<()> {
+        Err(read_only(from))
+    }
+    /// Make the directory's entries (a rename, a removal) durable.
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        Err(read_only(dir))
+    }
+    /// Remove a file Blink created: a temp file, or a sidecar that an undo takes back.
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        Err(read_only(path))
+    }
+}
+
+fn read_only(p: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("read-only file system: {}", p.display()),
+    )
 }
 
 /// The real file system.
@@ -80,6 +113,47 @@ impl Fs for RealFs {
         }
         Ok(out)
     }
+
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        // Windows needs write access for FlushFileBuffers.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .sync_all()
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // Unix: rename(2), atomic replace. Windows: std uses FileRenameInfoEx with
+        // FILE_RENAME_FLAG_REPLACE_IF_EXISTS (MoveFileExW with MOVEFILE_REPLACE_EXISTING on old
+        // systems), an atomic replace like ReplaceFileW (ADR 0015).
+        std::fs::rename(from, to)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(dir)?.sync_all()
+        }
+        // NTFS journals renames; a directory handle can't be flushed without extra privileges.
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+            Ok(())
+        }
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
 }
 
 /// One call made against a [`MemFs`].
@@ -88,6 +162,65 @@ pub enum FsCall {
     Read(PathBuf),
     Metadata(PathBuf),
     ReadDir(PathBuf),
+    WriteNew(PathBuf),
+    SyncFile(PathBuf),
+    Rename(PathBuf, PathBuf),
+    SyncDir(PathBuf),
+    RemoveFile(PathBuf),
+}
+
+impl FsCall {
+    /// Whether the call changes the file system.
+    pub fn is_write(&self) -> bool {
+        !matches!(self, Self::Read(_) | Self::Metadata(_) | Self::ReadDir(_))
+    }
+
+    /// The paths a write call changes (empty for reads and syncs).
+    pub fn changed_paths(&self) -> Vec<&Path> {
+        match self {
+            Self::WriteNew(p) | Self::RemoveFile(p) => vec![p],
+            Self::Rename(a, b) => vec![a, b],
+            _ => vec![],
+        }
+    }
+}
+
+/// A directory change not yet made durable by `sync_dir`; undone by [`MemFs::power_loss`].
+#[derive(Debug, Clone)]
+enum Pending {
+    /// `path` was created.
+    Created(PathBuf),
+    /// `from` was renamed over `to`; `to_before` is what `to` held.
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+        to_before: Option<Vec<u8>>,
+        to_before_unsynced: bool,
+    },
+    /// `path` was removed; it held `bytes`.
+    Removed { path: PathBuf, bytes: Vec<u8> },
+}
+
+impl Pending {
+    fn dir(&self) -> Option<&Path> {
+        match self {
+            Self::Created(p) | Self::Removed { path: p, .. } => p.parent(),
+            Self::Renamed { to, .. } => to.parent(),
+        }
+    }
+}
+
+/// Crash-injection state of a [`MemFs`].
+#[derive(Debug, Default)]
+struct Faults {
+    /// Number of write calls made so far.
+    writes: usize,
+    /// The write call (0-based) that fails; every later write fails too (the process died).
+    fail_at: Option<usize>,
+    /// Files whose data was written but not fsynced.
+    unsynced: std::collections::BTreeSet<PathBuf>,
+    /// Directory changes not yet fsynced, oldest first.
+    pending: Vec<Pending>,
 }
 
 /// In-memory file system for tests. Directories are implicit (any prefix of a file path) or
@@ -99,6 +232,7 @@ pub struct MemFs {
     dirs: Mutex<BTreeMap<PathBuf, bool>>,
     mtimes: Mutex<BTreeMap<PathBuf, SystemTime>>,
     log: Mutex<Vec<FsCall>>,
+    faults: Mutex<Faults>,
 }
 
 impl MemFs {
@@ -147,6 +281,89 @@ impl MemFs {
 
     fn record(&self, c: FsCall) {
         lock(&self.log).push(c);
+    }
+
+    /// Make the `n`-th write call from now (0-based) fail, and every write after it: the
+    /// process "dies" at that step. A failing `write_new` leaves a torn (half-written) file.
+    pub fn fail_at_write(&self, n: usize) {
+        let mut f = lock(&self.faults);
+        f.fail_at = Some(f.writes + n);
+    }
+
+    /// Number of write calls made so far.
+    pub fn write_count(&self) -> usize {
+        lock(&self.faults).writes
+    }
+
+    /// Simulate a power loss: directory changes since the last `sync_dir` of their directory are
+    /// undone (newest first), then data never fsynced is lost (the file is left empty).
+    /// Clears the injected fault, so the file system works again ("reboot").
+    pub fn power_loss(&self) {
+        let mut f = lock(&self.faults);
+        let mut files = lock(&self.files);
+        while let Some(p) = f.pending.pop() {
+            match p {
+                Pending::Created(path) => {
+                    files.remove(&path);
+                    f.unsynced.remove(&path);
+                }
+                Pending::Renamed {
+                    from,
+                    to,
+                    to_before,
+                    to_before_unsynced,
+                } => {
+                    if let Some(b) = files.remove(&to) {
+                        files.insert(from.clone(), b);
+                    }
+                    if f.unsynced.remove(&to) {
+                        f.unsynced.insert(from);
+                    }
+                    if let Some(b) = to_before {
+                        files.insert(to.clone(), b);
+                        if to_before_unsynced {
+                            f.unsynced.insert(to);
+                        }
+                    }
+                }
+                Pending::Removed { path, bytes } => {
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        for p in std::mem::take(&mut f.unsynced) {
+            if let Some(b) = files.get_mut(&p) {
+                b.clear();
+            }
+        }
+        f.fail_at = None;
+    }
+
+    /// Paths of all files, sorted.
+    pub fn file_paths(&self) -> Vec<PathBuf> {
+        lock(&self.files).keys().cloned().collect()
+    }
+
+    /// Contents of a file without recording a call.
+    pub fn peek(&self, path: impl AsRef<Path>) -> Option<Vec<u8>> {
+        lock(&self.files).get(path.as_ref()).cloned()
+    }
+
+    /// Count a write call; `Err` if it is the injected fault or comes after it.
+    fn write_step(&self, c: FsCall) -> io::Result<()> {
+        self.record(c);
+        let mut f = lock(&self.faults);
+        let n = f.writes;
+        f.writes += 1;
+        match f.fail_at {
+            Some(at) if n >= at => Err(io::Error::other(format!("injected failure at write {n}"))),
+            _ => Ok(()),
+        }
+    }
+
+    fn dir_exists(&self, path: &Path) -> bool {
+        path.parent()
+            .is_some_and(|d| d.as_os_str().is_empty() || lock(&self.dirs).contains_key(d))
     }
 }
 
@@ -223,6 +440,90 @@ impl Fs for MemFs {
             }
         }
         Ok(out)
+    }
+
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let torn = self.write_step(FsCall::WriteNew(path.to_path_buf()));
+        if lock(&self.files).contains_key(path) || lock(&self.dirs).contains_key(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                path.display().to_string(),
+            ));
+        }
+        if !self.dir_exists(path) {
+            return Err(not_found(path));
+        }
+        let data = match &torn {
+            Ok(()) => bytes.to_vec(),
+            Err(_) => bytes[..bytes.len() / 2].to_vec(),
+        };
+        lock(&self.files).insert(path.to_path_buf(), data);
+        let mut f = lock(&self.faults);
+        f.unsynced.insert(path.to_path_buf());
+        f.pending.push(Pending::Created(path.to_path_buf()));
+        torn
+    }
+
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        self.write_step(FsCall::SyncFile(path.to_path_buf()))?;
+        if !lock(&self.files).contains_key(path) {
+            return Err(not_found(path));
+        }
+        lock(&self.faults).unsynced.remove(path);
+        Ok(())
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.write_step(FsCall::Rename(from.to_path_buf(), to.to_path_buf()))?;
+        if lock(&self.dirs).contains_key(to) || !self.dir_exists(to) {
+            return Err(io::Error::other(format!(
+                "cannot rename to {}",
+                to.display()
+            )));
+        }
+        let mut files = lock(&self.files);
+        let bytes = files.remove(from).ok_or_else(|| not_found(from))?;
+        let to_before = files.insert(to.to_path_buf(), bytes);
+        drop(files);
+        let mut f = lock(&self.faults);
+        let to_before_unsynced = f.unsynced.remove(to);
+        if f.unsynced.remove(from) {
+            f.unsynced.insert(to.to_path_buf());
+        }
+        f.pending.push(Pending::Renamed {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            to_before,
+            to_before_unsynced,
+        });
+        drop(f);
+        let mut m = lock(&self.mtimes);
+        match m.remove(from) {
+            Some(t) => m.insert(to.to_path_buf(), t),
+            None => m.remove(to),
+        };
+        Ok(())
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.write_step(FsCall::SyncDir(dir.to_path_buf()))?;
+        lock(&self.faults).pending.retain(|p| p.dir() != Some(dir));
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.write_step(FsCall::RemoveFile(path.to_path_buf()))?;
+        let bytes = lock(&self.files)
+            .remove(path)
+            .ok_or_else(|| not_found(path))?;
+        lock(&self.mtimes).remove(path);
+        let mut f = lock(&self.faults);
+        f.unsynced.remove(path);
+        f.pending.push(Pending::Removed {
+            path: path.to_path_buf(),
+            bytes,
+        });
+        Ok(())
     }
 }
 
