@@ -3,6 +3,7 @@
 //! All file-system access goes through the [`fs::Fs`] trait.
 
 pub mod atomic;
+pub mod config;
 pub mod fs;
 pub mod inspect;
 pub mod loader;

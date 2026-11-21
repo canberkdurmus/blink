@@ -2,9 +2,10 @@
 //! (FILE-5), atomic writes (FILE-6), `xmp:MetadataDate` (FILE-9) and the rating-write debounce.
 //!
 //! Byte-exact undo (RATE-3): the writer remembers each sidecar's bytes (or absence) from before
-//! Blink first wrote it this session. Whenever the owned fields come back to those original
-//! values, the original bytes are restored (or the sidecar Blink created is removed), so undoing
-//! everything leaves every sidecar byte for byte as it was.
+//! Blink first wrote it this session. [`MarkChange::Restore`] (sent when an item's marks are back
+//! at their on-disk values) puts those bytes back, or removes a sidecar Blink created, as long as
+//! no other app changed the file since. Undoing everything leaves every sidecar byte for byte as
+//! it was (ADR 0016).
 //!
 //! [`Effect::WriteSidecar`]: blink_core::state::Effect::WriteSidecar
 
@@ -110,6 +111,9 @@ pub fn sidecar_targets(
 #[derive(Debug, Clone)]
 struct Pending {
     owns_adobe_name: bool,
+    /// A [`MarkChange::Restore`] with its values (RATE-3). `rating`/`label` then hold only the
+    /// changes queued after it.
+    restore: Option<(Option<i8>, Option<String>)>,
     rating: Option<Option<i8>>,
     label: Option<Option<String>>,
     since: Instant,
@@ -191,6 +195,7 @@ impl<'a> SidecarWriter<'a> {
     ) {
         let p = self.pending.entry(source).or_insert(Pending {
             owns_adobe_name,
+            restore: None,
             rating: None,
             label: None,
             since: now,
@@ -200,6 +205,11 @@ impl<'a> SidecarWriter<'a> {
         match change {
             MarkChange::Rating(r) => p.rating = Some(r),
             MarkChange::Label(l) => p.label = Some(l),
+            MarkChange::Restore { rating, label } => {
+                p.restore = Some((rating, label));
+                p.rating = None;
+                p.label = None;
+            }
         }
     }
 
@@ -231,6 +241,15 @@ impl<'a> SidecarWriter<'a> {
             .map(|(k, _)| k.clone())
             .collect();
         due.into_iter().map(|s| self.flush_one(s, now)).collect()
+    }
+
+    /// Start a new session (another folder opened): write what is queued, then forget the
+    /// original bytes and what Blink wrote, so restores never reach into an earlier session.
+    pub fn reset(&mut self) -> Vec<WriteReport> {
+        let r = self.flush_all();
+        self.baseline.clear();
+        self.last_written.clear();
+        r
     }
 
     /// Write everything now (on exit, and in the CLI).
@@ -274,40 +293,52 @@ impl<'a> SidecarWriter<'a> {
             .entry(target.to_path_buf())
             .or_insert_with(|| current.clone())
             .clone();
+        // The file still holds what Blink left there (or Blink hasn't touched it): a restore
+        // may put the original bytes back. Otherwise another app changed it since, and its
+        // changes must survive (FILE-5): the values are written into the current file.
+        let ours = self.last_written.get(target).is_none_or(|w| *w == current);
+        let (start, rating, label) = match &p.restore {
+            Some(_) if ours => (base, p.rating, p.label.clone()),
+            Some((r, l)) => (
+                current.clone(),
+                Some(p.rating.unwrap_or(*r)),
+                Some(p.label.clone().unwrap_or_else(|| l.clone())),
+            ),
+            None => (current.clone(), p.rating, p.label.clone()),
+        };
         let edit = OwnedEdit {
-            rating: match p.rating {
+            rating: match rating {
                 None => Edit::Keep,
                 Some(Some(r)) => Edit::Set(r),
                 Some(None) => Edit::Remove,
             },
-            label: match &p.label {
+            label: match &label {
                 None => Edit::Keep,
                 Some(Some(l)) => Edit::Set(l.clone()),
                 Some(None) => Edit::Remove,
             },
             metadata_date: blink_xmp::iso8601_utc(self.clock.unix_secs()),
         };
-        let new = blink_xmp::write_owned(current.as_deref(), &edit).map_err(|e| e.to_string())?;
-        // Back at the original values: restore the original bytes exactly (RATE-3).
-        // ... but only if the file is still what Blink left there: never over another app's
-        // later changes (FILE-5).
-        let ours = match self.last_written.get(target) {
-            Some(w) => *w == current,
-            None => current == base,
+        // Nothing to change: keep the bytes as they are (a restore keeps the original
+        // MetadataDate too).
+        let same = owned_of(start.as_deref()).is_some_and(|o| {
+            rating.as_ref().is_none_or(|r| o.rating == *r)
+                && label.as_ref().is_none_or(|l| o.label == *l)
+        });
+        let want = if same {
+            start
+        } else {
+            Some(blink_xmp::write_owned(start.as_deref(), &edit).map_err(|e| e.to_string())?)
         };
-        let restore =
-            ours && owned_of(base.as_deref()).is_some_and(|b| Some(b) == owned_of(Some(&new)));
         let fs = self.fs;
-        let r = match (restore, &base) {
-            (true, None) if current.is_some() => remove_sidecar(fs, target),
-            (true, None) => Ok(()),
-            (true, Some(b)) if current.as_ref() == Some(b) => Ok(()),
-            (true, Some(b)) => write_atomic(fs, target, b),
-            (false, _) => write_atomic(fs, target, &new),
+        let r = match &want {
+            None if current.is_some() => remove_sidecar(fs, target),
+            None => Ok(()),
+            Some(b) if current.as_ref() == Some(b) => Ok(()),
+            Some(b) => write_atomic(fs, target, b),
         };
         if r.is_ok() {
-            let now_on_disk = if restore { base } else { Some(new) };
-            self.last_written.insert(target.to_path_buf(), now_on_disk);
+            self.last_written.insert(target.to_path_buf(), want);
         }
         r.map_err(|e| e.to_string())
     }
@@ -320,6 +351,7 @@ enum Msg {
         owns_adobe_name: bool,
     },
     Flush(std::sync::mpsc::Sender<()>),
+    Reset,
 }
 
 /// The GUI's sidecar writer: a [`SidecarWriter`] on its own I/O thread (SPEC §8.3), so the UI
@@ -366,6 +398,11 @@ impl SidecarService {
                             change,
                             owns_adobe_name,
                         }) => w.queue(source, change, owns_adobe_name, Instant::now()),
+                        Some(Msg::Reset) => {
+                            for r in w.reset() {
+                                on_report(r);
+                            }
+                        }
                         Some(Msg::Flush(done)) => {
                             for r in w.flush_all() {
                                 on_report(r);
@@ -399,6 +436,13 @@ impl SidecarService {
                 change,
                 owns_adobe_name,
             });
+        }
+    }
+
+    /// A new folder session starts (see [`SidecarWriter::reset`]).
+    pub fn reset(&self) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::Reset);
         }
     }
 

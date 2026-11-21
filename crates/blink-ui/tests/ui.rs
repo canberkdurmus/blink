@@ -291,3 +291,64 @@ fn req_rate_4_ratings_and_labels_from_sidecars_show_in_the_overlay() {
     assert!(h.query_by_label("REJECTED").is_some());
     assert!(h.query_by_label("3 stars").is_none());
 }
+
+#[test]
+fn req_rate_1_req_rate_2_req_rate_3_keys_rate_label_pick_reject_and_undo() {
+    use egui::{Key, Modifiers};
+    let fs = Arc::new(folder(3));
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    let press = |h: &mut Harness<'static, BlinkApp>, m: Modifiers, k: Key| {
+        h.key_press_modifiers(m, k);
+        h.step();
+        h.step();
+    };
+    let marks = |h: &Harness<'static, BlinkApp>| {
+        h.state()
+            .state()
+            .marks
+            .get(Path::new("/f/IMG_0000.ARW"))
+            .cloned()
+            .unwrap_or_default()
+    };
+    press(&mut h, Modifiers::NONE, Key::Num3);
+    assert!(h.query_by_label("3 stars").is_some());
+    press(&mut h, Modifiers::NONE, Key::Num6);
+    assert!(h.query_by_label("Red").is_some());
+    press(&mut h, Modifiers::SHIFT, Key::Num9);
+    assert_eq!(marks(&h).label.as_deref(), Some("Purple"));
+    press(&mut h, Modifiers::NONE, Key::P);
+    assert_eq!(marks(&h).rating, Some(1));
+    assert!(h.query_by_label("PICK").is_some());
+    press(&mut h, Modifiers::NONE, Key::U);
+    assert_eq!(marks(&h).rating, Some(0));
+    press(&mut h, Modifiers::NONE, Key::X);
+    assert!(h.query_by_label("REJECTED").is_some());
+    // Undo back to the start, then redo once.
+    for _ in 0..6 {
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+    }
+    assert_eq!(marks(&h), Default::default());
+    press(&mut h, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    assert_eq!(marks(&h).rating, Some(3));
+    // Written on the I/O thread; undoing to the start and redoing leaves one sidecar.
+    h.state().flush_sidecars();
+    let got = blink_xmp::read_owned(&fs.peek("/f/IMG_0000.xmp").unwrap()).unwrap();
+    assert_eq!(got.rating, Some(3));
+    assert_eq!(got.label, None);
+    // Auto-advance (Shift+A): rating moves on.
+    press(&mut h, Modifiers::SHIFT, Key::A);
+    press(&mut h, Modifiers::NONE, Key::Num5);
+    assert_eq!(h.state().state().current, Some(1));
+}

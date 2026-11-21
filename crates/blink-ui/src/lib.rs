@@ -23,10 +23,22 @@ pub fn run(folder: Option<PathBuf>) -> eframe::Result {
             Ok(Box::new(BlinkApp::new(
                 &cc.egui_ctx,
                 folder,
-                Options::default(),
+                options_from_config(),
             )))
         }),
     )
+}
+
+/// Default options with the user's `config.toml` applied (RATE-2, D-3, PLAT-2 locations).
+pub fn options_from_config() -> Options {
+    let mut o = Options::default();
+    if let Some(paths) = blink_runtime::paths::AppPaths::for_current_exe(o.fs.as_ref()) {
+        let (c, msg) = blink_runtime::config::Config::load(o.fs.as_ref(), &paths.config_dir);
+        o.settings = c.settings;
+        o.sidecar_style = c.sidecar_style;
+        o.config_message = msg;
+    }
+    o
 }
 
 #[cfg(test)]

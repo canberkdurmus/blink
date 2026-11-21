@@ -91,6 +91,10 @@ pub struct Options {
     pub cache_bytes: usize,
     /// Name of new sidecars (D-3).
     pub sidecar_style: SidecarStyle,
+    /// Pick value, auto-advance, label names (config file).
+    pub settings: blink_core::state::Settings,
+    /// A config problem to show in the toast area at start.
+    pub config_message: Option<String>,
 }
 
 impl Default for Options {
@@ -101,6 +105,8 @@ impl Default for Options {
             workers: default_workers(),
             cache_bytes: DEFAULT_CACHE_BYTES,
             sidecar_style: SidecarStyle::default(),
+            settings: Default::default(),
+            config_message: None,
         }
     }
 }
@@ -112,6 +118,9 @@ pub struct BlinkApp {
     loader: Loader<Prepared>,
     /// Sidecar writes on their own I/O thread (FILE-4..6).
     sidecars: SidecarService,
+    /// The open folder's marks are loaded. Until then mark edits are ignored with a toast: the
+    /// load must read the files as they were, and an edit must know what it changes (RATE-3).
+    marks_loaded: bool,
     ctx: egui::Context,
     /// The context the loader wakes; follows the context the app is drawn in.
     wake_ctx: Arc<std::sync::Mutex<egui::Context>>,
@@ -189,6 +198,7 @@ impl BlinkApp {
             fs: opts.fs,
             loader,
             sidecars,
+            marks_loaded: true,
             ctx: ctx.clone(),
             wake_ctx,
             tx,
@@ -207,6 +217,8 @@ impl BlinkApp {
             drag_moved: false,
             loupe_rect: None,
         };
+        app.dispatch(Action::Configure(opts.settings));
+        app.state.toast = opts.config_message;
         if let Some(f) = folder {
             app.open_path(&f);
         }
@@ -280,7 +292,17 @@ impl BlinkApp {
         let mut queue = VecDeque::from([action]);
         while let Some(a) = queue.pop_front() {
             let scanned = matches!(a, Action::FolderScanned { .. });
+            let loaded = matches!(a, Action::MarksLoaded(_));
+            if a.is_mark_edit() && !self.marks_loaded {
+                self.state.toast = Some("Still reading ratings from the sidecars…".into());
+                self.toast_at = self.ctx.input(|i| i.time);
+                continue;
+            }
             if matches!(a, Action::OpenFolder(_)) {
+                // A new undo session: the writer forgets the old one's original bytes, and mark
+                // edits wait until this folder's marks are loaded (RATE-3).
+                self.sidecars.reset();
+                self.marks_loaded = false;
                 // Files may have changed on disk: never reuse an old texture for a path.
                 self.textures.clear();
                 self.overlay_textures.clear();
@@ -299,6 +321,9 @@ impl BlinkApp {
             }
             if scanned {
                 self.load_marks();
+            }
+            if loaded {
+                self.marks_loaded = true;
             }
             for e in fx {
                 match &e {
@@ -411,6 +436,19 @@ impl BlinkApp {
                     zoom: Zoom::Fit,
                     cursor: None,
                 }),
+                // Marks (RATE-1/2/3, SPEC §5.2). Alt+digit is the rating filter (M4).
+                Key::Z if m.command && m.shift => Some(Action::Redo),
+                Key::Z if m.command => Some(Action::Undo),
+                k if !m.command && !m.alt && digit(k).is_some() => match (digit(k), m.shift) {
+                    (Some(9), true) => Some(Action::ToggleLabel(4)),
+                    (Some(d @ 0..=5), false) => Some(Action::Rate(d as i8)),
+                    (Some(d @ 6..=9), false) => Some(Action::ToggleLabel(d - 6)),
+                    _ => None,
+                },
+                Key::P if !m.command => Some(Action::Pick),
+                Key::X if !m.command => Some(Action::Reject),
+                Key::U if !m.command => Some(Action::Unflag),
+                Key::A if m.shift && !m.command => Some(Action::ToggleAutoAdvance),
                 Key::J => Some(Action::ToggleClipping),
                 Key::I => Some(Action::ToggleInfoPanel),
                 Key::O if m.command => {
@@ -649,7 +687,7 @@ impl BlinkApp {
                         );
                     });
             }
-            if let Some((stars, rejected, label)) = marks {
+            if let Some((stars, rejected, picked, label)) = marks {
                 ui.horizontal(|ui| {
                     if stars > 0 {
                         star_widget(ui, stars);
@@ -661,6 +699,9 @@ impl BlinkApp {
                     };
                     if rejected {
                         ui.label(text("REJECTED"));
+                    }
+                    if picked {
+                        ui.label(text("PICK"));
                     }
                     if let Some(l) = label {
                         ui.label(text(&l));
@@ -691,12 +732,15 @@ impl BlinkApp {
     }
 
     /// Rating and label of the current item for the overlay: (stars 1–5, rejected, label).
-    fn marks_shown(&self) -> Option<(u8, bool, Option<String>)> {
+    /// Overlay marks of the current item: (stars, rejected, picked, label).
+    fn marks_shown(&self) -> Option<(u8, bool, bool, Option<String>)> {
         let item = self.state.current_item()?;
         let m = self.state.marks.get(&item.primary.path)?;
         let stars = m.rating.filter(|&r| r > 0).map_or(0, |r| r as u8);
         let rejected = m.rating == Some(-1);
-        (stars > 0 || rejected || m.label.is_some()).then(|| (stars, rejected, m.label.clone()))
+        let picked = m.rating == Some(self.state.settings.pick_value);
+        (stars > 0 || rejected || m.label.is_some())
+            .then(|| (stars, rejected, picked, m.label.clone()))
     }
 
     /// What to draw for `path`, best first: the full-resolution image matching the shown
@@ -1016,6 +1060,14 @@ fn star_widget(ui: &mut egui::Ui, n: u8) -> egui::Response {
         }
     }
     resp
+}
+
+/// The digit of a number-row key.
+fn digit(k: Key) -> Option<usize> {
+    use Key::*;
+    [Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9]
+        .iter()
+        .position(|&d| d == k)
 }
 
 pub fn apply_theme(ctx: &egui::Context) {
