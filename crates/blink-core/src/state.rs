@@ -789,7 +789,9 @@ mod tests {
             Some(Effect::Show {
                 ahead, prefetch, ..
             }) => {
-                assert!(ahead.iter().all(|a| prefetch.contains(a)));
+                // The first items ahead are the prefetch window's; decode-ahead reaches further.
+                let window: Vec<_> = ahead.iter().filter(|a| prefetch.contains(a)).collect();
+                assert!(ahead.iter().zip(&window).all(|(a, w)| a == *w));
                 ahead
                     .iter()
                     .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -800,7 +802,7 @@ mod tests {
         let (s, fx) = reduce(&s, Action::Navigate(Nav::Next));
         let (s, fx) = (s, ahead(&fx));
         assert_eq!(
-            fx,
+            fx[..8],
             [
                 "02.ARW", "03.ARW", "04.ARW", "05.ARW", "06.ARW", "07.ARW", "08.ARW", "09.ARW"
             ]
