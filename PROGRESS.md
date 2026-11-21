@@ -25,7 +25,7 @@ in `crates/blink-app`. Then VIEW-4 (needs VIEW-2), VIEW-6, VIEW-9, and PERF-1/2/
 
 ## M1 Headless core
 
-- [x] OPEN-1 — `req_open_1_corpus_item_list_equals_filtered_directory_listing`, `req_open_1_non_recursive_lists_only_the_folder`, `req_open_1_open_folder_is_non_recursive_by_default_and_toggle_rescans`, `req_open_1_recursive_does_not_follow_directory_links`, `req_open_1_recursive_scan_terminates_on_a_real_symlink_loop`, `req_open_1_recursive_skips_hidden_and_rejected`, `req_open_1_scan_only_reads_directories` (#8) · GUI entry points (drop, dialog, `blink [folder]`) land with VIEW-1 in M2 (ADR 0010)
+- [x] OPEN-1 — `req_open_1_corpus_item_list_equals_filtered_directory_listing`, `req_open_1_non_recursive_lists_only_the_folder`, `req_open_1_open_folder_is_non_recursive_by_default_and_toggle_rescans`, `req_open_1_recursive_does_not_follow_directory_links`, `req_open_1_recursive_scan_terminates_on_a_real_symlink_loop`, `req_open_1_recursive_skips_hidden_and_rejected`, `req_open_1_scan_only_reads_directories` (#8) · GUI entry points (drop, dialog, `blink [folder]`): `req_open_1_dropping_a_folder_or_file_opens_its_folder`, `req_open_1_a_relative_file_argument_opens_the_current_folder`, `req_view_1_command_line_folder_opens_in_the_loupe_fit_with_the_embedded_preview` (#14, ADR 0013)
 - [x] OPEN-2 — `req_open_2_label_applies_to_every_pair_member_and_only_the_label_changes`, `req_open_2_n_pairs_show_as_n_items`, `req_open_2_pairing_rules`, `req_open_2_pairs_only_within_the_same_folder`, `req_open_2_rating_applies_to_every_pair_member` (#8, #9) · on-disk sidecar per member completes with FILE-4 in M3 (ADR 0010)
 - [x] OPEN-4 — `req_open_4_classifies_by_extension_case_insensitively`, `req_open_4_doctor_lists_format_support`, `req_open_4_every_corpus_file_is_a_supported_raw_format` (#6, #9)
 - [x] VIEW-2 — `req_view_2_largest_of_several_embedded_previews_is_chosen`, `req_view_2_largest_preview_chosen_per_camera`, `req_view_2_low_res_threshold_is_half_the_sensor_long_edge` (#6)
@@ -41,14 +41,14 @@ in `crates/blink-app`. Then VIEW-4 (needs VIEW-2), VIEW-6, VIEW-9, and PERF-1/2/
 
 ## M2 Loupe and speed
 
-- [ ] VIEW-1
-- [ ] VIEW-4
-- [ ] VIEW-6
-- [ ] VIEW-9
-- [ ] PERF-1
-- [ ] PERF-2
-- [ ] PERF-3
-- [ ] PERF-5
+- [x] VIEW-1 — `req_view_1_a_load_in_flight_during_clear_never_fills_the_cache`, `req_view_1_arrow_keys_move_and_no_frame_shows_a_stale_item`, `req_view_1_a_running_prefetch_still_wanted_by_a_newer_show_is_not_dropped`, `req_view_1_command_line_folder_opens_in_the_loupe_fit_with_the_embedded_preview`, `req_view_1_first_item_shows_its_embedded_preview_and_neighbours_are_prefetched`, `req_view_1_fit_scales_the_image_into_the_viewport_and_centres_it`, `req_view_1_heif_and_unreadable_files_show_no_preview`, `req_view_1_loupe_screenshot_golden`, `req_view_1_navigation_moves_the_current_item_and_never_shows_stale_pixels`, `req_view_1_opening_shows_the_first_item_fit_with_its_embedded_preview` (#13, #14)
+- [x] VIEW-4 — `req_view_4_full_resolution_is_needed_only_when_the_preview_would_be_upscaled`, `req_view_4_paired_jpeg_is_named_in_the_full_request_and_failure_clears_the_spinner`, `req_view_4_raw_decode_has_the_sensor_crop_size_on_every_decodable_corpus_file`, `req_view_4_zoom_100_on_low_res_raw_ends_with_raw_decode_at_sensor_size`, `req_view_4_zoom_at_cursor_keeps_the_point_under_the_cursor`, `req_view_4_zoom_on_low_res_arw_ends_with_raw_decode_at_sensor_size`, `req_view_4_zoom_on_low_res_raw_loads_the_raw_decode_and_swaps_it_in`, `req_view_4_zoom_on_low_res_raw_with_a_paired_jpeg_uses_the_jpeg`, `req_view_4_z_zooms_to_100_percent_with_every_pixel_and_req_view_9_keeps_it_on_the_next_item` (#13, #14)
+- [x] VIEW-6 — `req_view_6_clipping_and_info_panel_toggle`, `req_view_6_clipping_mask_is_exact_on_a_synthetic_image`, `req_view_6_histograms_are_exact_and_labelled_with_the_source`, `req_view_6_j_toggles_the_clipping_overlay_and_i_shows_the_labelled_histogram`, `req_view_6_overlay_tiles_colour_clipped_pixels`, `req_view_6_thresholds_are_254_any_channel_and_1_all_channels` (#13, #14)
+- [x] VIEW-9 — `req_view_9_pan_with_drag_moves_the_image_and_stays_inside`, `req_view_9_zoom_levels_are_fit_50_100_200_of_the_full_image`, `req_view_9_zoom_position_is_kept_on_the_next_item_and_toggleable` (#13, #14)
+- [x] PERF-1 — `req_perf_1_launch_to_first_image_with_2000_raws` (#13, #14) · GUI headless bench (ADR 0014)
+- [x] PERF-2 — `req_perf_2_next_item_prefetched_is_drawn_at_once` (#13, #14) · GUI headless bench (ADR 0014)
+- [x] PERF-3 — `req_perf_3_held_arrow_key_never_shows_a_stale_item`, `req_perf_3_lead_is_the_first_item_not_passed_when_a_decode_ends`, `req_perf_3_lead_is_zero_while_decodes_keep_up`, `req_perf_3_lead_items_go_first_and_the_current_item_first_once_settled`, `req_perf_3_show_lists_the_items_ahead_in_the_travel_direction_nearest_first`, `req_perf_3_steady_steps_measure_the_interval_and_a_stop_settles` (#13, #14) · GUI headless bench (ADR 0014)
+- [x] PERF-5 — `req_perf_5_decode_raw_requests_a_raw_decode_even_with_a_full_size_preview_or_jpeg`, `req_perf_5_full_raw_decode_45mp_for_100_percent_zoom` (#13, #14) · GUI headless bench (ADR 0014)
 
 ## M3 Ratings and sidecars
 
