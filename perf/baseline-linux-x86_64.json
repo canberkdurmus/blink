@@ -1,3 +1,8 @@
 {
-  "PERF-4": { "median_ms": 65.9 }
+  "PERF-1": { "median_ms": 184.9 },
+  "PERF-2": { "median_ms": 0.5 },
+  "PERF-3": { "median_ms": 103.9 },
+  "PERF-4": { "median_ms": 65.9 },
+  "PERF-5": { "median_ms": 1999.5 },
+  "PERF-5/frame": { "median_ms": 0.2 }
 }
