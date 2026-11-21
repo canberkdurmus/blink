@@ -174,6 +174,59 @@ fn req_view_6_j_toggles_the_clipping_overlay_and_i_shows_the_labelled_histogram(
     assert_eq!(hist.red.iter().sum::<u32>(), 600 * 400);
 }
 
+/// Step frames until `done` holds (bounded).
+fn step_until(h: &mut Harness<'static, BlinkApp>, what: &str, done: impl Fn(&BlinkApp) -> bool) {
+    let t = Instant::now();
+    while !done(h.state()) {
+        assert!(t.elapsed() < Duration::from_secs(30), "{what}");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn req_view_4_z_zooms_to_100_percent_with_every_pixel_and_req_view_9_keeps_it_on_the_next_item() {
+    // Previews larger than the screen are drawn from a screen-resolution copy at Fit, and from
+    // their real pixels once zoomed to 100 %.
+    let big = |s: u8| {
+        let q = [[200, 40, s], [40, 200, s], [s, 40, 200], [250, 250, 250]];
+        tiff_with_jpegs(&[jpeg(&quadrants(3000, 2000, q), 3000, 2000, 90, None)])
+    };
+    let fs = MemFs::new();
+    fs.add_dir("/f");
+    fs.add_file("/f/A.ARW", big(10));
+    fs.add_file("/f/B.ARW", big(90));
+    fs.add_file("/f/C.ARW", big(170));
+    let mut h = harness(fs, true);
+    settle(&mut h);
+    let d = h.state().displayed().unwrap().clone();
+    assert_eq!(d.size, (3000, 2000));
+    assert!(d.pixels.0 <= blink_ui::tiles::SCREEN_LONG, "fit: {d:?}");
+
+    h.key_press(egui::Key::Z);
+    step_until(&mut h, "100 % never drew every pixel", |a| {
+        a.displayed().is_some_and(|d| d.pixels == (3000, 2000))
+    });
+    assert_eq!(h.state().state().loupe.zoom, Zoom::P100);
+
+    // Keep zoom (default on): the next item opens at 100 % too, at full resolution.
+    h.key_press(egui::Key::ArrowRight);
+    step_until(&mut h, "next item never drawn at 100 %", |a| {
+        a.displayed()
+            .is_some_and(|d| d.path == Path::new("/f/B.ARW") && d.pixels == (3000, 2000))
+    });
+    assert_eq!(h.state().state().loupe.zoom, Zoom::P100);
+
+    // Toggled off: the next item opens fit again.
+    h.state_mut().dispatch(blink_core::state::Action::SetKeepZoom(false));
+    h.key_press(egui::Key::ArrowRight);
+    step_until(&mut h, "next item never drawn fit", |a| {
+        a.displayed().is_some_and(|d| d.path == Path::new("/f/C.ARW"))
+    });
+    assert_eq!(h.state().state().loupe.zoom, Zoom::Fit);
+    assert!(h.state().displayed().unwrap().pixels.0 <= blink_ui::tiles::SCREEN_LONG);
+}
+
 #[cfg(target_os = "linux")]
 mod full_ui {
     use super::*;

@@ -44,7 +44,11 @@ type OverlayCell = (WeakLoaded, Arc<OnceLock<Vec<Tile>>>);
 pub struct Displayed {
     pub path: PathBuf,
     pub source: PreviewSource,
+    /// Pixel size of the loaded image.
     pub size: (u32, u32),
+    /// Pixel size of the tile set drawn: `size`, or a screen-resolution copy while the image
+    /// is shown no larger than that copy.
+    pub pixels: (u32, u32),
 }
 
 /// A tile's place in its image, in image pixels.
@@ -534,7 +538,9 @@ impl BlinkApp {
             {
                 let key = (l.path.clone(), l.level, variant);
                 let full = (l.size.0 as f32, l.size.1 as f32);
+                let mut pixels = l.size;
                 if let Some(up) = self.textures.get(&key) {
+                    pixels = up.size;
                     let size = (up.size.0 as f32, up.size.1 as f32);
                     for (t, tex) in &up.tiles {
                         painter.image(
@@ -552,6 +558,7 @@ impl BlinkApp {
                     path: l.path.clone(),
                     source: l.source,
                     size: l.size,
+                    pixels,
                 });
             }
         }
