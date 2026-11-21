@@ -218,10 +218,12 @@ fn req_view_4_z_zooms_to_100_percent_with_every_pixel_and_req_view_9_keeps_it_on
     assert_eq!(h.state().state().loupe.zoom, Zoom::P100);
 
     // Toggled off: the next item opens fit again.
-    h.state_mut().dispatch(blink_core::state::Action::SetKeepZoom(false));
+    h.state_mut()
+        .dispatch(blink_core::state::Action::SetKeepZoom(false));
     h.key_press(egui::Key::ArrowRight);
     step_until(&mut h, "next item never drawn fit", |a| {
-        a.displayed().is_some_and(|d| d.path == Path::new("/f/C.ARW"))
+        a.displayed()
+            .is_some_and(|d| d.path == Path::new("/f/C.ARW"))
     });
     assert_eq!(h.state().state().loupe.zoom, Zoom::Fit);
     assert!(h.state().displayed().unwrap().pixels.0 <= blink_ui::tiles::SCREEN_LONG);
