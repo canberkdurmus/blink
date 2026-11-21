@@ -26,8 +26,17 @@ const USAGE: &str = "usage:
 -r: include sub-folders. Filter EXPR: comma-separated, AND-combined:
   rating>=N, rating=N, rejected, !rejected, picked, label=NAME, kind=raw|dng|jpeg|heif";
 
-/// Default pick value (D-2): pick = 1 star.
-const PICK_VALUE: i8 = 1;
+/// The user's `config.toml` (pick value, sidecar style, label names), defaults if absent.
+fn config(fs: &dyn Fs) -> blink_runtime::config::Config {
+    let Some(p) = blink_runtime::paths::AppPaths::for_current_exe(fs) else {
+        return Default::default();
+    };
+    let (c, msg) = blink_runtime::config::Config::load(fs, &p.config_dir);
+    if let Some(m) = msg {
+        eprintln!("blink-cli: {m}");
+    }
+    c
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,7 +52,8 @@ struct Opts {
     filter: Filter,
     format: String,
     formats_flag: bool,
-    style: SidecarStyle,
+    /// `--style`; `None`: the config file's (D-3).
+    style: Option<SidecarStyle>,
     positional: Vec<String>,
 }
 
@@ -54,7 +64,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         filter: Filter::default(),
         format: "txt".into(),
         formats_flag: false,
-        style: SidecarStyle::default(),
+        style: None,
         positional: Vec::new(),
     };
     let mut it = args.iter();
@@ -69,8 +79,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             }
             "--style" => {
                 o.style = match it.next().map(String::as_str) {
-                    Some("adobe") => SidecarStyle::Adobe,
-                    Some("darktable") => SidecarStyle::Darktable,
+                    Some("adobe") => Some(SidecarStyle::Adobe),
+                    Some("darktable") => Some(SidecarStyle::Darktable),
                     _ => return Err("--style needs adobe or darktable".into()),
                 }
             }
@@ -140,6 +150,7 @@ fn open(
     recursive: bool,
 ) -> Result<State, String> {
     let mut s = State::new(formats(backend));
+    s = reduce(&s, Action::Configure(config(fs).settings)).0;
     if recursive {
         s = reduce(&s, Action::SetRecursive(true)).0;
     }
@@ -168,7 +179,7 @@ fn rel(folder: &Path, p: &Path) -> String {
 fn filtered<'a>(s: &'a State, f: &Filter) -> Vec<&'a Item> {
     s.items
         .iter()
-        .filter(|i| f.matches(i, s.marks.get(&i.primary.path), PICK_VALUE))
+        .filter(|i| f.matches(i, s.marks.get(&i.primary.path), s.settings.pick_value))
         .collect()
 }
 
@@ -285,7 +296,7 @@ fn cmd_export(
                     .map(|r| r.to_string())
                     .unwrap_or_default();
                 let label = m.and_then(|m| m.label.clone()).unwrap_or_default();
-                let pick = m.and_then(|m| m.rating) == Some(PICK_VALUE);
+                let pick = m.and_then(|m| m.rating) == Some(s.settings.pick_value);
                 let _ = writeln!(
                     out,
                     "{},{rating},{},{pick}",
@@ -351,7 +362,11 @@ fn cmd_mark(
     // Same reducer as the GUI: exactly its sidecar effects are planned or written.
     let (_, effects) = reduce(&s, action);
     let clock = SystemClock;
-    let mut writer = SidecarWriter::new(fs, &clock, o.style);
+    let mut writer = SidecarWriter::new(
+        fs,
+        &clock,
+        o.style.unwrap_or_else(|| config(fs).sidecar_style),
+    );
     for e in effects {
         if let Effect::WriteSidecar {
             source,
@@ -365,6 +380,7 @@ fn cmd_mark(
                     MarkChange::Rating(None) => "remove xmp:Rating".into(),
                     MarkChange::Label(Some(l)) => format!("set xmp:Label={l}"),
                     MarkChange::Label(None) => "remove xmp:Label".into(),
+                    MarkChange::Restore { .. } => "restore the original sidecar".into(),
                 };
                 let _ = writeln!(
                     out,

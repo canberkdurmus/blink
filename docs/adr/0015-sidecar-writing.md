@@ -62,7 +62,8 @@ M3 makes Blink write sidecars (FILE-4, FILE-5, FILE-6, FILE-7, FILE-9) and execu
 6. **MetadataDate (FILE-9)** is UTC with an explicit `+00:00` offset, e.g.
    `2026-11-21T09:05:00+00:00`. This is ISO 8601 with offset, it compares correctly in
    Lightroom, and it needs no time-zone dependency. It is written on every change.
-7. **Byte-exact undo (for RATE-3).** The writer keeps each sidecar's bytes (or absence) from
+7. **Byte-exact undo (for RATE-3).** *(Amended by ADR 0016 §7: the restore is triggered by the
+   reducer's `MarkChange::Restore`, not by comparing values per file.)* The writer keeps each sidecar's bytes (or absence) from
    before Blink first wrote it in the session. When a write would leave the owned fields equal
    to those original values, the original bytes are restored instead (`MetadataDate` included).
    A sidecar Blink created is removed. Undoing everything therefore restores every sidecar byte

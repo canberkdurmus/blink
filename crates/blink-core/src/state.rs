@@ -19,6 +19,40 @@ pub struct Marks {
     pub label: Option<String>,
 }
 
+/// The colour labels, in key order (`6`–`9`, `Shift+9`; SPEC §5.2).
+pub const LABELS: [&str; 5] = ["Red", "Yellow", "Green", "Blue", "Purple"];
+
+/// User settings the reducer needs (loaded from the config file by the runtime).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// Star value a pick maps to (D-2, RATE-2): 1–5, default 1.
+    pub pick_value: i8,
+    /// Move to the next item after a rating, pick, reject or unflag (RATE-1).
+    pub auto_advance: bool,
+    /// The `xmp:Label` value written for each colour of [`LABELS`] (SPEC §6: names configurable
+    /// for apps that differ).
+    pub label_names: [String; 5],
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            pick_value: 1,
+            auto_advance: false,
+            label_names: LABELS.map(String::from),
+        }
+    }
+}
+
+/// One undoable change of an item's marks (RATE-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    /// The item's primary path.
+    pub key: PathBuf,
+    pub before: Marks,
+    pub after: Marks,
+}
+
 /// Application state.
 #[derive(Debug, Clone)]
 pub struct State {
@@ -30,6 +64,13 @@ pub struct State {
     pub current: Option<usize>,
     /// Marks per item, keyed by the item's primary path.
     pub marks: BTreeMap<PathBuf, Marks>,
+    /// Marks as read from disk on open (RATE-4). When an item's marks return to these, its
+    /// sidecars are restored byte for byte (RATE-3).
+    pub disk_marks: BTreeMap<PathBuf, Marks>,
+    pub settings: Settings,
+    /// Undo and redo stacks (RATE-3), newest last. Cleared when another folder opens.
+    pub undo: Vec<Edit>,
+    pub redo: Vec<Edit>,
     /// Loupe view (VIEW-1, VIEW-4, VIEW-9).
     pub loupe: Loupe,
     /// Direction of the last move, for the prefetch window.
@@ -54,6 +95,25 @@ impl ItemRef {
             kind: item.primary.kind,
             paired_jpeg: item.paired_jpeg().map(PathBuf::from),
         }
+    }
+}
+
+impl Action {
+    /// Changes marks (or their history). The GUI holds these back until the folder's marks are
+    /// loaded: before that, an edit can't know what it changes (RATE-3, RATE-4).
+    pub fn is_mark_edit(&self) -> bool {
+        matches!(
+            self,
+            Self::SetRating { .. }
+                | Self::SetLabel { .. }
+                | Self::Rate(_)
+                | Self::Pick
+                | Self::Reject
+                | Self::Unflag
+                | Self::ToggleLabel(_)
+                | Self::Undo
+                | Self::Redo
+        )
     }
 }
 
@@ -84,6 +144,10 @@ impl State {
             items: Vec::new(),
             current: None,
             marks: BTreeMap::new(),
+            disk_marks: BTreeMap::new(),
+            settings: Settings::default(),
+            undo: Vec::new(),
+            redo: Vec::new(),
             loupe: Loupe::default(),
             direction: Direction::Forward,
             toast: None,
@@ -151,6 +215,24 @@ pub enum Action {
         item: usize,
         label: Option<String>,
     },
+    /// Keys `0`–`5`: set the current item's stars (RATE-1).
+    Rate(i8),
+    /// `P`: rating = the pick value (RATE-2).
+    Pick,
+    /// `X`: rating = −1.
+    Reject,
+    /// `U`: clear a pick or a reject. A pick is cleared only if the rating equals the pick
+    /// value (RATE-2); other star ratings stay.
+    Unflag,
+    /// `6`–`9`, `Shift+9`: toggle colour label `LABELS[i]` on the current item.
+    ToggleLabel(usize),
+    /// `Shift+A`.
+    ToggleAutoAdvance,
+    /// `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` (RATE-3).
+    Undo,
+    Redo,
+    /// Apply settings from the config file.
+    Configure(Settings),
     /// Move to another item (VIEW-1).
     Navigate(Nav),
     /// Set the zoom; with a cursor position (viewport pixels) zoom happens at the cursor.
@@ -233,6 +315,14 @@ pub enum MarkChange {
     Rating(Option<i8>),
     /// Set `xmp:Label` (`None` removes it).
     Label(Option<String>),
+    /// The item's marks are back at their on-disk values (RATE-3): put each sidecar back exactly
+    /// as it was before Blink first wrote it this session (or remove one it created). A sidecar
+    /// another app changed since gets these values instead. Field changes queued after it apply
+    /// on top.
+    Restore {
+        rating: Option<i8>,
+        label: Option<String>,
+    },
 }
 
 /// Folder and lower-cased stem: files that share it share the Adobe-style sidecar name.
@@ -266,6 +356,110 @@ fn sidecar_writes(items: &[Item], item: usize, change: &MarkChange) -> Vec<Effec
         .collect()
 }
 
+fn navigate(s: &mut State, nav: Nav, fx: &mut Vec<Effect>) {
+    let len = s.items.len();
+    if let Some(cur) = s.current {
+        let (next, dir) = match nav {
+            Nav::Next => ((cur + 1).min(len - 1), Direction::Forward),
+            Nav::Prev => (cur.saturating_sub(1), Direction::Backward),
+            Nav::First => (0, Direction::Backward),
+            Nav::Last => (len - 1, Direction::Forward),
+        };
+        s.direction = dir;
+        if next != cur {
+            s.current = Some(next);
+            // Never show the previous item's pixels for the new item (PERF-3).
+            s.loupe.shown = None;
+            s.loupe.pending_full = false;
+            if !s.loupe.keep_zoom {
+                s.loupe.zoom = Zoom::Fit;
+                s.loupe.center = [0.5, 0.5];
+            }
+            fx.extend(s.show_effect());
+        }
+    }
+}
+
+/// Set the marks of `items[item]`: record the edit for undo (when `undo` is set), update the
+/// state and emit the sidecar writes for the fields that changed (OPEN-2).
+fn set_marks(s: &mut State, item: usize, new: Marks, fx: &mut Vec<Effect>, undo: bool) {
+    let Some(it) = s.items.get(item) else {
+        return;
+    };
+    let key = it.primary.path.clone();
+    let old = s.marks.get(&key).cloned().unwrap_or_default();
+    if old == new {
+        return;
+    }
+    if undo {
+        s.undo.push(Edit {
+            key: key.clone(),
+            before: old.clone(),
+            after: new.clone(),
+        });
+        s.redo.clear();
+    }
+    let disk = s.disk_marks.get(&key).cloned().unwrap_or_default();
+    if new == disk {
+        let restore = MarkChange::Restore {
+            rating: new.rating,
+            label: new.label.clone(),
+        };
+        fx.extend(sidecar_writes(&s.items, item, &restore));
+    } else {
+        if new.rating != old.rating {
+            fx.extend(sidecar_writes(
+                &s.items,
+                item,
+                &MarkChange::Rating(new.rating),
+            ));
+        }
+        if new.label != old.label {
+            fx.extend(sidecar_writes(
+                &s.items,
+                item,
+                &MarkChange::Label(new.label.clone()),
+            ));
+        }
+    }
+    s.marks.insert(key, new);
+}
+
+/// Change the current item's rating; auto-advance if on (RATE-1).
+fn rate_current(s: &mut State, rating: Option<i8>, fx: &mut Vec<Effect>) {
+    let Some(cur) = s.current else { return };
+    let Some(key) = s.current_item().map(|i| i.primary.path.clone()) else {
+        return;
+    };
+    let mut m = s.marks.get(&key).cloned().unwrap_or_default();
+    if let Some(r) = rating {
+        m.rating = Some(r);
+    }
+    set_marks(s, cur, m, fx, true);
+    if s.settings.auto_advance {
+        navigate(s, Nav::Next, fx);
+    }
+}
+
+/// Undo (`redo == false`) or redo the newest edit.
+fn undo_redo(s: &mut State, redo: bool, fx: &mut Vec<Effect>) {
+    let popped = if redo { s.redo.pop() } else { s.undo.pop() };
+    let Some(e) = popped else { return };
+    let target = if redo {
+        e.after.clone()
+    } else {
+        e.before.clone()
+    };
+    if let Some(i) = s.items.iter().position(|it| it.primary.path == e.key) {
+        set_marks(s, i, target, fx, false);
+    }
+    if redo {
+        s.undo.push(e);
+    } else {
+        s.redo.push(e);
+    }
+}
+
 /// The pure reducer.
 pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
     let mut s = state.clone();
@@ -275,6 +469,9 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             s.folder = Some(folder.clone());
             s.items.clear();
             s.marks.clear();
+            s.disk_marks.clear();
+            s.undo.clear();
+            s.redo.clear();
             s.current = None;
             fx.push(Effect::ScanFolder {
                 folder,
@@ -311,29 +508,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 fx.extend(s.show_effect());
             }
         }
-        Action::Navigate(nav) => {
-            let len = s.items.len();
-            if let Some(cur) = s.current {
-                let (next, dir) = match nav {
-                    Nav::Next => ((cur + 1).min(len - 1), Direction::Forward),
-                    Nav::Prev => (cur.saturating_sub(1), Direction::Backward),
-                    Nav::First => (0, Direction::Backward),
-                    Nav::Last => (len - 1, Direction::Forward),
-                };
-                s.direction = dir;
-                if next != cur {
-                    s.current = Some(next);
-                    // Never show the previous item's pixels for the new item (PERF-3).
-                    s.loupe.shown = None;
-                    s.loupe.pending_full = false;
-                    if !s.loupe.keep_zoom {
-                        s.loupe.zoom = Zoom::Fit;
-                        s.loupe.center = [0.5, 0.5];
-                    }
-                    fx.extend(s.show_effect());
-                }
-            }
-        }
+        Action::Navigate(nav) => navigate(&mut s, nav, &mut fx),
         Action::SetZoom { zoom, cursor } => {
             s.loupe.set_zoom(zoom, cursor);
             fx.extend(s.full_effect());
@@ -426,36 +601,81 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
         Action::MarksLoaded(list) => {
             // Loading runs off-thread: a field the user already set wins over the file's value.
             for (path, m) in list {
+                // The first load after open is what's on disk. A reload after a rescan reads
+                // Blink's own writes back and must move neither the restore point nor the undo
+                // history, nor the marks (RATE-3).
+                if s.disk_marks.contains_key(&path) {
+                    continue;
+                }
+                s.disk_marks.insert(path.clone(), m.clone());
                 let e = s.marks.entry(path).or_default();
                 e.rating = e.rating.or(m.rating);
                 e.label = e.label.take().or(m.label);
             }
+            // Items with nothing on disk: their restore point is "no marks", even after Blink
+            // has written a sidecar for them and a rescan reads it.
+            for it in &s.items {
+                s.disk_marks.entry(it.primary.path.clone()).or_default();
+            }
         }
         Action::SetRating { item, rating } => {
-            if let Some(it) = s.items.get(item)
-                && (-1..=5).contains(&rating)
+            if (-1..=5).contains(&rating)
+                && let Some(it) = s.items.get(item)
             {
-                let key = it.primary.path.clone();
-                let mut m = s.marks.get(&key).cloned().unwrap_or_default();
+                let mut m = s.marks.get(&it.primary.path).cloned().unwrap_or_default();
                 m.rating = Some(rating);
-                fx.extend(sidecar_writes(
-                    &s.items,
-                    item,
-                    &MarkChange::Rating(Some(rating)),
-                ));
-                s.marks.insert(key, m);
+                set_marks(&mut s, item, m, &mut fx, true);
             }
         }
         Action::SetLabel { item, label } => {
             if let Some(it) = s.items.get(item) {
-                let key = it.primary.path.clone();
-                fx.extend(sidecar_writes(
-                    &s.items,
-                    item,
-                    &MarkChange::Label(label.clone()),
-                ));
-                s.marks.entry(key).or_default().label = label;
+                let mut m = s.marks.get(&it.primary.path).cloned().unwrap_or_default();
+                m.label = label;
+                set_marks(&mut s, item, m, &mut fx, true);
             }
+        }
+        Action::Rate(n) => {
+            if (0..=5).contains(&n) {
+                rate_current(&mut s, Some(n), &mut fx);
+            }
+        }
+        Action::Pick => {
+            let v = s.settings.pick_value;
+            rate_current(&mut s, Some(v), &mut fx);
+        }
+        Action::Reject => rate_current(&mut s, Some(-1), &mut fx),
+        Action::Unflag => {
+            let r = s
+                .current_item()
+                .and_then(|i| s.marks.get(&i.primary.path))
+                .and_then(|m| m.rating);
+            let flagged = r == Some(-1) || r == Some(s.settings.pick_value);
+            rate_current(&mut s, flagged.then_some(0), &mut fx);
+        }
+        Action::ToggleLabel(i) => {
+            if let (Some(cur), Some(name)) = (s.current, s.settings.label_names.get(i).cloned()) {
+                let key = s.items[cur].primary.path.clone();
+                let mut m = s.marks.get(&key).cloned().unwrap_or_default();
+                m.label = if m.label.as_deref() == Some(name.as_str()) {
+                    None
+                } else {
+                    Some(name)
+                };
+                set_marks(&mut s, cur, m, &mut fx, true);
+            }
+        }
+        Action::ToggleAutoAdvance => {
+            s.settings.auto_advance = !s.settings.auto_advance;
+            s.toast = Some(format!(
+                "Auto-advance {}",
+                if s.settings.auto_advance { "on" } else { "off" }
+            ));
+        }
+        Action::Undo => undo_redo(&mut s, false, &mut fx),
+        Action::Redo => undo_redo(&mut s, true, &mut fx),
+        Action::Configure(mut settings) => {
+            settings.pick_value = settings.pick_value.clamp(1, 5);
+            s.settings = settings;
         }
     }
     (s, fx)
@@ -975,5 +1195,223 @@ mod tests {
         // A standalone JPEG has no RAW data.
         let s = opened(&["b.JPG"]);
         assert!(reduce(&s, Action::DecodeRaw).1.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn opened(names: &[&str]) -> State {
+        let s = State::new(Formats::new(["arw"]));
+        let (s, _) = reduce(&s, Action::OpenFolder("/f".into()));
+        let files = names
+            .iter()
+            .map(|n| ScannedFile {
+                path: Path::new("/f").join(n),
+                len: 1,
+            })
+            .collect();
+        reduce(
+            &s,
+            Action::FolderScanned {
+                folder: "/f".into(),
+                recursive: false,
+                files,
+            },
+        )
+        .0
+    }
+
+    fn marks(s: &State, p: &str) -> Marks {
+        s.marks.get(Path::new(p)).cloned().unwrap_or_default()
+    }
+
+    fn m(r: Option<i8>, l: Option<&str>) -> Marks {
+        Marks {
+            rating: r,
+            label: l.map(str::to_string),
+        }
+    }
+
+    fn changes(fx: &[Effect]) -> Vec<(String, MarkChange)> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::WriteSidecar { source, change, .. } => {
+                    Some((source.display().to_string(), change.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn req_rate_1_each_key_sets_stars_reject_and_toggles_labels() {
+        let mut s = opened(&["a.ARW", "a.JPG", "b.ARW"]);
+        for n in 0..=5 {
+            let (t, fx) = reduce(&s, Action::Rate(n));
+            assert_eq!(marks(&t, "/f/a.ARW").rating, Some(n));
+            if n > 0 {
+                assert_eq!(
+                    changes(&fx),
+                    [
+                        ("/f/a.ARW".into(), MarkChange::Rating(Some(n))),
+                        ("/f/a.JPG".into(), MarkChange::Rating(Some(n)))
+                    ]
+                );
+            }
+            s = t;
+        }
+        assert!(reduce(&s, Action::Rate(6)).1.is_empty());
+        let (s, _) = reduce(&s, Action::Reject);
+        assert_eq!(marks(&s, "/f/a.ARW").rating, Some(-1));
+        for (i, name) in LABELS.iter().enumerate() {
+            let (t, fx) = reduce(&s, Action::ToggleLabel(i));
+            assert_eq!(marks(&t, "/f/a.ARW"), m(Some(-1), Some(name)));
+            // Only the label is written.
+            assert!(
+                changes(&fx)
+                    .iter()
+                    .all(|(_, c)| *c == MarkChange::Label(Some(name.to_string())))
+            );
+            // Same key again removes it.
+            let (u, _) = reduce(&t, Action::ToggleLabel(i));
+            assert_eq!(marks(&u, "/f/a.ARW").label, None);
+        }
+        // Another label replaces the current one.
+        let (s, _) = reduce(&s, Action::ToggleLabel(0));
+        let (s, _) = reduce(&s, Action::ToggleLabel(3));
+        assert_eq!(marks(&s, "/f/a.ARW").label.as_deref(), Some("Blue"));
+        assert!(reduce(&s, Action::ToggleLabel(5)).1.is_empty());
+    }
+
+    #[test]
+    fn req_rate_1_auto_advance_moves_on_after_rating_and_toggles() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::Rate(3));
+        assert_eq!(s.current, Some(0));
+        let (s, _) = reduce(&s, Action::ToggleAutoAdvance);
+        assert!(s.settings.auto_advance);
+        assert_eq!(s.toast.as_deref(), Some("Auto-advance on"));
+        let (s, fx) = reduce(&s, Action::Rate(4));
+        assert_eq!(s.current, Some(1));
+        assert!(fx.iter().any(|e| matches!(e, Effect::Show { .. })));
+        let (s, _) = reduce(&s, Action::Pick);
+        let (s, _) = reduce(&s, Action::Reject);
+        assert_eq!(s.current, Some(2));
+        assert_eq!(marks(&s, "/f/b.ARW").rating, Some(1));
+        assert_eq!(marks(&s, "/f/c.ARW").rating, Some(-1));
+        // Labels don't advance.
+        let (s, _) = reduce(&s, Action::Navigate(Nav::First));
+        let (s, _) = reduce(&s, Action::ToggleLabel(0));
+        assert_eq!(s.current, Some(0));
+        let (s, _) = reduce(&s, Action::ToggleAutoAdvance);
+        let (s, _) = reduce(&s, Action::Rate(1));
+        assert_eq!(s.current, Some(0));
+    }
+
+    #[test]
+    fn req_rate_2_pick_uses_the_configured_value_and_unpick_only_clears_it() {
+        for pick in 1..=5i8 {
+            let s = opened(&["a.ARW"]);
+            let (s, _) = reduce(
+                &s,
+                Action::Configure(Settings {
+                    pick_value: pick,
+                    ..Settings::default()
+                }),
+            );
+            let (s, _) = reduce(&s, Action::Pick);
+            assert_eq!(marks(&s, "/f/a.ARW").rating, Some(pick));
+            let (u, _) = reduce(&s, Action::Unflag);
+            assert_eq!(marks(&u, "/f/a.ARW").rating, Some(0));
+            // A rating that isn't the pick value stays.
+            let other = if pick == 5 { 4 } else { pick + 1 };
+            let (t, _) = reduce(&s, Action::Rate(other));
+            let (t, fx) = reduce(&t, Action::Unflag);
+            assert_eq!(marks(&t, "/f/a.ARW").rating, Some(other));
+            assert!(changes(&fx).is_empty());
+            // Unflag also clears a reject.
+            let (r, _) = reduce(&s, Action::Reject);
+            let (r, _) = reduce(&r, Action::Unflag);
+            assert_eq!(marks(&r, "/f/a.ARW").rating, Some(0));
+        }
+        // Out-of-range config values are clamped.
+        let s = opened(&["a.ARW"]);
+        let (s, _) = reduce(
+            &s,
+            Action::Configure(Settings {
+                pick_value: 9,
+                ..Settings::default()
+            }),
+        );
+        assert_eq!(s.settings.pick_value, 5);
+    }
+
+    #[test]
+    fn req_rate_2_label_names_come_from_the_config() {
+        let s = opened(&["a.ARW"]);
+        let mut cfg = Settings::default();
+        cfg.label_names[4] = "Violet".into();
+        let (s, _) = reduce(&s, Action::Configure(cfg));
+        let (s, fx) = reduce(&s, Action::ToggleLabel(4));
+        assert_eq!(marks(&s, "/f/a.ARW").label.as_deref(), Some("Violet"));
+        assert_eq!(changes(&fx)[0].1, MarkChange::Label(Some("Violet".into())));
+    }
+
+    #[test]
+    fn req_rate_3_undo_redo_walks_the_history_and_restores_at_disk_values() {
+        let s = opened(&["a.ARW", "b.ARW"]);
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![("/f/a.ARW".into(), m(Some(2), Some("Red")))]),
+        );
+        let (s, _) = reduce(&s, Action::Rate(4));
+        let (s, _) = reduce(&s, Action::ToggleLabel(2));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        let (s, _) = reduce(&s, Action::Reject);
+        assert_eq!(s.undo.len(), 3);
+        let (s, fx) = reduce(&s, Action::Undo);
+        assert_eq!(marks(&s, "/f/b.ARW"), m(None, None));
+        assert_eq!(
+            changes(&fx),
+            [(
+                "/f/b.ARW".into(),
+                MarkChange::Restore {
+                    rating: None,
+                    label: None
+                }
+            )]
+        );
+        let (s, _) = reduce(&s, Action::Undo);
+        assert_eq!(marks(&s, "/f/a.ARW"), m(Some(4), Some("Red")));
+        let (s, fx) = reduce(&s, Action::Undo);
+        assert_eq!(marks(&s, "/f/a.ARW"), m(Some(2), Some("Red")));
+        assert_eq!(
+            changes(&fx),
+            [(
+                "/f/a.ARW".into(),
+                MarkChange::Restore {
+                    rating: Some(2),
+                    label: Some("Red".into())
+                }
+            )]
+        );
+        assert!(reduce(&s, Action::Undo).1.is_empty());
+        // Redo replays in order; a new edit clears the redo stack.
+        let (s, _) = reduce(&s, Action::Redo);
+        assert_eq!(marks(&s, "/f/a.ARW"), m(Some(4), Some("Red")));
+        let (s, _) = reduce(&s, Action::Redo);
+        assert_eq!(marks(&s, "/f/a.ARW"), m(Some(4), Some("Green")));
+        let (s, _) = reduce(&s, Action::Rate(1));
+        assert!(s.redo.is_empty());
+        assert!(reduce(&s, Action::Redo).1.is_empty());
+        // Setting the same value is not an edit.
+        let n = s.undo.len();
+        assert_eq!(reduce(&s, Action::Rate(1)).0.undo.len(), n);
+        // Opening another folder starts a new history.
+        let (s, _) = reduce(&s, Action::OpenFolder("/g".into()));
+        assert!(s.undo.is_empty() && s.redo.is_empty());
     }
 }

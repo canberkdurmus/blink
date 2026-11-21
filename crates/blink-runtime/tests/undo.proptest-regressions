@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ef23b983cc524954396be3b1eb2200785109b4bdd0d6706a96d9befcb863908c # shrinks to steps = [Do(Rate(3))], darktable = false
+cc 6eaa9ae718d7cb45862006ec1414189cd8512306d57accc3299e430120c5d986 # shrinks to early = [Do(ToggleAutoAdvance)], steps = [Do(Rate(0)), Do(Rate(0)), Do(Rate(0)), Flush, Rescan], darktable = false
+cc 98a89e7c28a25eea20620e814be12551adbb5361aa98a7a12d8d87705c67b703 # shrinks to early = [Do(ToggleLabel(0))], steps = [Do(Navigate(Next))], darktable = false
