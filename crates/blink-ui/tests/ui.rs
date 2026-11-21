@@ -361,3 +361,86 @@ fn req_rate_1_req_rate_3_mark_keys_write_sidecars_and_ctrl_z_takes_them_back() {
     h.state().flush_sidecars();
     assert_eq!(owned("/f/IMG_0000.xmp").unwrap().rating, Some(3));
 }
+
+#[test]
+fn req_file_8_external_change_reloads_and_a_conflict_keeps_disk_and_shows_a_marker() {
+    let fs = Arc::new(folder(2));
+    fs.add_file(
+        "/f/IMG_0001.xmp",
+        blink_testkit::sidecars::lightroom(1, None),
+    );
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    let wait = |h: &mut Harness<'static, BlinkApp>, f: &dyn Fn(&BlinkApp) -> bool| {
+        let t = Instant::now();
+        while !f(h.state()) {
+            assert!(t.elapsed() < Duration::from_secs(10));
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.step();
+    };
+    // No unsaved changes: an outside edit is simply reloaded.
+    fs.add_file(
+        "/f/IMG_0000.xmp",
+        blink_testkit::sidecars::lightroom(4, Some("Green")),
+    );
+    h.state().sidecars_changed(vec!["/f/IMG_0000.xmp".into()]);
+    wait(&mut h, &|a| {
+        a.state()
+            .marks
+            .get(Path::new("/f/IMG_0000.ARW"))
+            .and_then(|m| m.rating)
+            == Some(4)
+    });
+    assert!(h.query_by_label("4 stars").is_some());
+    assert!(h.query_by_label("CONFLICT").is_none());
+    // Unsaved change (still in the debounce) + an outside edit: the disk version wins.
+    h.key_press(egui::Key::ArrowRight);
+    settle(&mut h);
+    h.key_press(egui::Key::Num5);
+    h.step();
+    fs.add_file(
+        "/f/IMG_0001.xmp",
+        blink_testkit::sidecars::lightroom(2, Some("Red")),
+    );
+    h.state().sidecars_changed(vec!["/f/IMG_0001.xmp".into()]);
+    wait(&mut h, &|a| {
+        a.state().conflicts.contains(Path::new("/f/IMG_0001.ARW"))
+    });
+    let m = h.state().state().marks[Path::new("/f/IMG_0001.ARW")].clone();
+    assert_eq!((m.rating, m.label.as_deref()), (Some(2), Some("Red")));
+    assert!(h.query_by_label("CONFLICT").is_some());
+    assert!(
+        h.state()
+            .state()
+            .log
+            .iter()
+            .any(|l| l.contains("kept the on-disk version"))
+    );
+    h.state().flush_sidecars();
+    assert_eq!(
+        fs.peek("/f/IMG_0001.xmp").unwrap(),
+        blink_testkit::sidecars::lightroom(2, Some("Red")).as_bytes()
+    );
+    // Rating again clears the marker and writes over the reloaded file.
+    h.key_press(egui::Key::Num3);
+    h.step();
+    assert!(
+        !h.state()
+            .state()
+            .conflicts
+            .contains(Path::new("/f/IMG_0001.ARW"))
+    );
+}

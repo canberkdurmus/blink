@@ -290,6 +290,11 @@ impl MemFs {
         f.fail_at = Some(f.writes + n);
     }
 
+    /// Stop failing writes: the fault was transient (a full disk freed up), not a crash.
+    pub fn clear_fault(&self) {
+        lock(&self.faults).fail_at = None;
+    }
+
     /// Number of write calls made so far.
     pub fn write_count(&self) -> usize {
         lock(&self.faults).writes

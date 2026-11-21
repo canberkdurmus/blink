@@ -106,6 +106,28 @@ pub fn sidecar_targets(
     }]
 }
 
+/// Whether `sidecar` is one of the names `source` writes (FILE-4), on any file system case.
+pub fn belongs_to(sidecar: &Path, source: &Path, owns_adobe_name: bool) -> bool {
+    let eq = |p: PathBuf| p.as_os_str().eq_ignore_ascii_case(sidecar.as_os_str());
+    eq(darktable_path(source, "xmp")) || (owns_adobe_name && eq(adobe_path(source, "xmp")))
+}
+
+/// A sidecar changed on disk, not by Blink (FILE-8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalChange {
+    pub sidecar: PathBuf,
+    /// Blink had unsaved (queued) changes for these sources; they were dropped, so the on-disk
+    /// version wins.
+    pub dropped: Vec<PathBuf>,
+}
+
+impl ExternalChange {
+    /// Blink had unsaved changes for this sidecar: show a conflict marker and log it.
+    pub fn conflict(&self) -> bool {
+        !self.dropped.is_empty()
+    }
+}
+
 /// A queued change of one owned field.
 #[derive(Debug, Clone)]
 enum Want<T> {
@@ -124,6 +146,9 @@ struct Pending {
     since: Instant,
     /// Failed attempts so far (retries back off).
     attempts: u32,
+    /// The sidecars as they were when the first change was queued: if one differs at write time,
+    /// another app changed it meanwhile and the on-disk version wins (FILE-8).
+    seen: BTreeMap<PathBuf, Option<Vec<u8>>>,
 }
 
 /// Outcome of writing one source file's sidecars.
@@ -149,6 +174,8 @@ pub struct SidecarWriter<'a> {
     /// Bytes Blink last wrote to each sidecar (`None`: it removed it). A file that no longer
     /// holds them was changed by another app, so it is never restored over.
     last_written: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    /// External changes found at write time (see [`SidecarWriter::take_external`]).
+    external: Vec<ExternalChange>,
 }
 
 /// Re-queue a failed write: retries back off from `DEBOUNCE` up to 30 s, so a sidecar that
@@ -187,6 +214,7 @@ impl<'a> SidecarWriter<'a> {
             pending: BTreeMap::new(),
             baseline: BTreeMap::new(),
             last_written: BTreeMap::new(),
+            external: Vec::new(),
         }
     }
 
@@ -198,13 +226,29 @@ impl<'a> SidecarWriter<'a> {
         owns_adobe_name: bool,
         now: Instant,
     ) {
-        let p = self.pending.entry(source).or_insert(Pending {
-            owns_adobe_name,
-            rating: None,
-            label: None,
-            since: now,
-            attempts: 0,
-        });
+        if !self.pending.contains_key(&source) {
+            let seen = sidecar_targets(self.fs, &source, self.style, owns_adobe_name)
+                .into_iter()
+                .map(|t| {
+                    let b = read_opt(self.fs, &t).ok().flatten();
+                    (t, b)
+                })
+                .collect();
+            self.pending.insert(
+                source.clone(),
+                Pending {
+                    owns_adobe_name,
+                    rating: None,
+                    label: None,
+                    since: now,
+                    attempts: 0,
+                    seen,
+                },
+            );
+        }
+        let Some(p) = self.pending.get_mut(&source) else {
+            return;
+        };
         p.owns_adobe_name = owns_adobe_name;
         match change {
             MarkChange::Rating(r) => p.rating = Some(Want::Value(r)),
@@ -233,6 +277,51 @@ impl<'a> SidecarWriter<'a> {
         self.pending.remove(source).is_some()
     }
 
+    /// `sidecar` changed on disk (a watcher event). `None` if it holds what Blink last wrote (its
+    /// own write) or isn't a sidecar. Otherwise the new bytes become the reference for later
+    /// writes and restores, and queued changes of the files it belongs to are dropped: the
+    /// on-disk version wins (FILE-8).
+    pub fn external_change(&mut self, sidecar: &Path) -> Option<ExternalChange> {
+        if !crate::atomic::is_sidecar_path(sidecar) {
+            return None;
+        }
+        // Event paths may differ in case from the scan's on case-insensitive file systems: use
+        // the name Blink knows the sidecar by.
+        let sidecar = self
+            .last_written
+            .keys()
+            .chain(self.baseline.keys())
+            .find(|k| k.as_os_str().eq_ignore_ascii_case(sidecar.as_os_str()))
+            .cloned()
+            .unwrap_or_else(|| sidecar.to_path_buf());
+        let sidecar = sidecar.as_path();
+        let current = read_opt(self.fs, sidecar).ok()?;
+        if self.last_written.get(sidecar) == Some(&current) {
+            return None;
+        }
+        self.baseline.insert(sidecar.to_path_buf(), current.clone());
+        self.last_written.insert(sidecar.to_path_buf(), current);
+        let dropped: Vec<PathBuf> = self
+            .pending
+            .iter()
+            .filter(|(src, p)| belongs_to(sidecar, src, p.owns_adobe_name))
+            .map(|(src, _)| src.clone())
+            .collect();
+        for d in &dropped {
+            self.pending.remove(d);
+        }
+        Some(ExternalChange {
+            sidecar: sidecar.to_path_buf(),
+            dropped,
+        })
+    }
+
+    /// External changes the writer found when it was about to write (FILE-8); the GUI handles
+    /// them like watcher events.
+    pub fn take_external(&mut self) -> Vec<ExternalChange> {
+        std::mem::take(&mut self.external)
+    }
+
     /// Write everything that is due at `now`.
     pub fn flush_due(&mut self, now: Instant) -> Vec<WriteReport> {
         let due: Vec<PathBuf> = self
@@ -252,7 +341,7 @@ impl<'a> SidecarWriter<'a> {
     }
 
     fn flush_one(&mut self, source: PathBuf, now: Instant) -> WriteReport {
-        let Some(p) = self.pending.remove(&source) else {
+        let Some(mut p) = self.pending.remove(&source) else {
             return WriteReport {
                 source,
                 sidecars: vec![],
@@ -260,10 +349,35 @@ impl<'a> SidecarWriter<'a> {
             };
         };
         let targets = sidecar_targets(self.fs, &source, self.style, p.owns_adobe_name);
+        // Changed on disk since the change was queued (and the watcher hasn't said so yet):
+        // keep the on-disk version, drop Blink's unsaved change (FILE-8).
+        // (A read error is no evidence: the write below fails and is retried.)
+        let changed = targets.iter().find(|t| {
+            read_opt(self.fs, t).is_ok_and(|now| p.seen.get(*t).cloned().flatten() != now)
+        });
+        if let Some(t) = changed.cloned() {
+            let current = read_opt(self.fs, &t).ok().flatten();
+            self.baseline.insert(t.clone(), current.clone());
+            self.last_written.insert(t.clone(), current);
+            self.external.push(ExternalChange {
+                sidecar: t,
+                dropped: vec![source.clone()],
+            });
+            return WriteReport {
+                source,
+                sidecars: vec![],
+                result: Ok(()),
+            };
+        }
         let mut result = Ok(());
         for t in &targets {
             if let Err(e) = self.apply(t, &p) {
                 result = Err(format!("{}: {e}", t.display()));
+            }
+            // What Blink put on disk is not another app's change, also when a later step of
+            // the write failed (a retry must not see a conflict).
+            if let Some(w) = self.last_written.get(t) {
+                p.seen.insert(t.clone(), w.clone());
             }
         }
         if result.is_err() {
@@ -327,9 +441,11 @@ impl<'a> SidecarWriter<'a> {
             (true, Some(b)) => write_atomic(fs, target, b),
             (false, _) => write_atomic(fs, target, &new),
         };
-        if r.is_ok() {
-            let now_on_disk = if restore { base } else { Some(new) };
-            self.last_written.insert(target.to_path_buf(), now_on_disk);
+        let intended = if restore { base } else { Some(new) };
+        // Also after a failure: the rename may have happened before a later step (the
+        // directory fsync) failed, and then these bytes are Blink's, not another app's.
+        if r.is_ok() || read_opt(fs, target).is_ok_and(|now| now == intended) {
+            self.last_written.insert(target.to_path_buf(), intended);
         }
         r.map_err(|e| e.to_string())
     }
@@ -342,29 +458,60 @@ enum Msg {
         owns_adobe_name: bool,
     },
     Flush(std::sync::mpsc::Sender<()>),
+    /// Watch a folder for sidecar changes (FILE-8); `None` stops watching.
+    Watch(Option<(PathBuf, bool)>),
+    /// Paths a watcher reported.
+    Changed(Vec<PathBuf>),
+    /// Write what is queued and stop (the thread holds a sender for its watcher, so the channel
+    /// alone never disconnects).
+    Shutdown,
+}
+
+/// What the service reports back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarEvent {
+    Written(WriteReport),
+    External(ExternalChange),
 }
 
 /// The GUI's sidecar writer: a [`SidecarWriter`] on its own I/O thread (SPEC §8.3), so the UI
 /// thread never waits for a disk. Queued changes are written [`DEBOUNCE`] after the first one;
-/// dropping the service writes everything still queued.
+/// dropping the service writes everything still queued. It also watches the open folder and
+/// reports sidecars that other apps change (FILE-8).
 pub struct SidecarService {
     tx: Option<std::sync::mpsc::Sender<Msg>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SidecarService {
-    /// Start the writer thread. `on_report` gets the outcome of every write.
+    /// Start the writer thread. `on_event` gets the outcome of every write and every external
+    /// change.
     pub fn spawn(
         fs: std::sync::Arc<dyn Fs>,
         clock: std::sync::Arc<dyn Clock>,
         style: SidecarStyle,
-        on_report: impl Fn(WriteReport) + Send + 'static,
+        on_event: impl Fn(SidecarEvent) + Send + 'static,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+        let watch_tx = tx.clone();
         let handle = std::thread::Builder::new()
             .name("blink-sidecars".into())
             .spawn(move || {
                 let mut w = SidecarWriter::new(fs.as_ref(), clock.as_ref(), style);
+                let mut watcher: Option<notify::RecommendedWatcher> = None;
+                let report = |w: &mut SidecarWriter, all: bool| {
+                    let reps = if all {
+                        w.flush_all()
+                    } else {
+                        w.flush_due(Instant::now())
+                    };
+                    for r in reps {
+                        on_event(SidecarEvent::Written(r));
+                    }
+                    for c in w.take_external() {
+                        on_event(SidecarEvent::External(c));
+                    }
+                };
                 loop {
                     let msg = match w.next_due() {
                         None => rx.recv().ok(),
@@ -373,9 +520,7 @@ impl SidecarService {
                             match rx.recv_timeout(wait) {
                                 Ok(m) => Some(m),
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                    for r in w.flush_due(Instant::now()) {
-                                        on_report(r);
-                                    }
+                                    report(&mut w, false);
                                     continue;
                                 }
                                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
@@ -389,21 +534,27 @@ impl SidecarService {
                             owns_adobe_name,
                         }) => w.queue(source, change, owns_adobe_name, Instant::now()),
                         Some(Msg::Flush(done)) => {
-                            for r in w.flush_all() {
-                                on_report(r);
-                            }
+                            report(&mut w, true);
                             let _ = done.send(());
                         }
-                        None => {
-                            for r in w.flush_all() {
-                                on_report(r);
+                        Some(Msg::Watch(target)) => {
+                            watcher =
+                                target.and_then(|(dir, rec)| watch(&dir, rec, watch_tx.clone()));
+                        }
+                        Some(Msg::Changed(paths)) => {
+                            for p in paths {
+                                if let Some(c) = w.external_change(&p) {
+                                    on_event(SidecarEvent::External(c));
+                                }
                             }
+                        }
+                        Some(Msg::Shutdown) | None => {
+                            drop(watcher.take());
+                            report(&mut w, true);
                             return;
                         }
                     }
-                    for r in w.flush_due(Instant::now()) {
-                        on_report(r);
-                    }
+                    report(&mut w, false);
                 }
             })
             .ok();
@@ -415,16 +566,32 @@ impl SidecarService {
 
     /// Queue a change from an [`Effect::WriteSidecar`](blink_core::state::Effect::WriteSidecar).
     pub fn queue(&self, source: PathBuf, change: MarkChange, owns_adobe_name: bool) {
+        self.send(Msg::Queue {
+            source,
+            change,
+            owns_adobe_name,
+        });
+    }
+
+    /// Watch `folder` (and its sub-folders if `recursive`) for sidecar changes; replaces the
+    /// previous watch.
+    pub fn watch(&self, folder: PathBuf, recursive: bool) {
+        self.send(Msg::Watch(Some((folder, recursive))));
+    }
+
+    /// Report that `paths` changed, as a watcher would (tests; file systems without events).
+    pub fn changed(&self, paths: Vec<PathBuf>) {
+        self.send(Msg::Changed(paths));
+    }
+
+    fn send(&self, m: Msg) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Msg::Queue {
-                source,
-                change,
-                owns_adobe_name,
-            });
+            let _ = tx.send(m);
         }
     }
 
-    /// Write everything queued now and wait until it is on disk.
+    /// Write everything queued now and wait until it is on disk. Also waits for every message
+    /// sent before it (watch events included) to be handled.
     pub fn flush(&self) {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         if let Some(tx) = &self.tx
@@ -435,9 +602,54 @@ impl SidecarService {
     }
 }
 
+/// A notify watcher that forwards sidecar paths to the service thread. `None` if the folder
+/// can't be watched (then external changes are noticed only when Blink next writes: the
+/// writer never restores over a file that no longer holds what it wrote).
+fn watch(
+    dir: &Path,
+    recursive: bool,
+    tx: std::sync::mpsc::Sender<Msg>,
+) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    // Some backends (FSEvents) report real paths: `/private/var/…` for `/var/…`, a symlinked
+    // volume's target. Map them back onto the folder as opened, which is how the scan, the
+    // writer and the reducer name every file.
+    let opened = dir.to_path_buf();
+    let real = std::fs::canonicalize(dir).unwrap_or_else(|_| opened.clone());
+    let map = move |p: PathBuf| match p.strip_prefix(&real) {
+        Ok(rest) if real != opened => opened.join(rest),
+        _ => p,
+    };
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res
+            && !matches!(ev.kind, notify::EventKind::Access(_))
+        {
+            let paths: Vec<PathBuf> = ev
+                .paths
+                .into_iter()
+                .filter(|p| crate::atomic::is_sidecar_path(p))
+                .map(&map)
+                .collect();
+            if !paths.is_empty() {
+                let _ = tx.send(Msg::Changed(paths));
+            }
+        }
+    })
+    .ok()?;
+    let mode = if recursive {
+        notify::RecursiveMode::Recursive
+    } else {
+        notify::RecursiveMode::NonRecursive
+    };
+    w.watch(dir, mode).ok()?;
+    Some(w)
+}
+
 impl Drop for SidecarService {
     fn drop(&mut self) {
-        self.tx.take();
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Msg::Shutdown);
+        }
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }

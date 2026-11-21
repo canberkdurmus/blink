@@ -12,7 +12,7 @@ use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
 use blink_runtime::fs::Fs;
 use blink_runtime::loader::{DEFAULT_CACHE_BYTES, Loaded, Loader, default_workers};
-use blink_runtime::sidecar::{SidecarService, SidecarStyle, SystemClock};
+use blink_runtime::sidecar::{SidecarEvent, SidecarService, SidecarStyle, SystemClock};
 use egui::{Color32, Key, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -180,15 +180,31 @@ impl BlinkApp {
             opts.fs.clone(),
             Arc::new(SystemClock),
             opts.sidecar_style,
-            move |rep| {
-                if let Err(error) = rep.result {
-                    let _ = stx.send(Action::SidecarWriteFailed {
-                        source: rep.source,
-                        error,
-                    });
-                    if let Ok(c) = wake.lock() {
-                        c.request_repaint();
+            move |ev| {
+                let a = match ev {
+                    SidecarEvent::Written(rep) => match rep.result {
+                        Err(error) => Action::SidecarWriteFailed {
+                            source: rep.source,
+                            error,
+                        },
+                        Ok(()) => return,
+                    },
+                    SidecarEvent::External(c) => {
+                        if c.conflict() {
+                            eprintln!(
+                                "blink: {} changed on disk while Blink had unsaved changes for it; kept the on-disk version",
+                                c.sidecar.display()
+                            );
+                        }
+                        Action::SidecarChanged {
+                            conflict: c.conflict(),
+                            sidecar: c.sidecar,
+                        }
                     }
+                };
+                let _ = stx.send(a);
+                if let Ok(c) = wake.lock() {
+                    c.request_repaint();
                 }
             },
         );
@@ -266,6 +282,11 @@ impl BlinkApp {
         self.sidecars.flush();
     }
 
+    /// Report sidecar paths as changed, as the folder watcher would (tests).
+    pub fn sidecars_changed(&self, paths: Vec<PathBuf>) {
+        self.sidecars.changed(paths);
+    }
+
     /// No decode job is queued or running.
     pub fn loader_idle(&self) -> bool {
         self.loader.idle()
@@ -314,7 +335,26 @@ impl BlinkApp {
             for e in fx {
                 match &e {
                     Effect::ScanFolder { folder, recursive } => {
+                        self.sidecars.watch(folder.clone(), *recursive);
                         self.scan(folder.clone(), *recursive)
+                    }
+                    Effect::ReloadMarks {
+                        item,
+                        conflict,
+                        generation,
+                    } => {
+                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+                        let (item, conflict, generation) = (item.clone(), *conflict, *generation);
+                        std::thread::spawn(move || {
+                            let marks = blink_runtime::marks::load_item_marks(fs.as_ref(), &item);
+                            let _ = tx.send(Action::MarksReloaded {
+                                key: item.primary.path,
+                                marks,
+                                conflict,
+                                generation,
+                            });
+                            ctx.request_repaint();
+                        });
                     }
                     Effect::WriteSidecar {
                         source,
@@ -706,6 +746,12 @@ impl BlinkApp {
                     if o.rejected {
                         ui.label(text("REJECTED"));
                     }
+                    if o.conflict {
+                        ui.label(text("CONFLICT").color(Color32::from_rgb(255, 170, 60)))
+                            .on_hover_text(
+                                "The sidecar changed on disk; Blink kept the on-disk version",
+                            );
+                    }
                     if let Some((l, c)) = o.label {
                         if let Some(c) = c {
                             let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
@@ -750,8 +796,9 @@ impl BlinkApp {
                 let c = self.state.prefs.color_of(&l);
                 (l, c)
             }),
+            conflict: self.state.conflicts.contains(&item.primary.path),
         };
-        (o.stars > 0 || o.rejected || o.label.is_some()).then_some(o)
+        (o.stars > 0 || o.rejected || o.conflict || o.label.is_some()).then_some(o)
     }
 
     /// What to draw for `path`, best first: the full-resolution image matching the shown
@@ -934,6 +981,8 @@ struct Overlay {
     rejected: bool,
     /// Stored label and the colour it names (configured names, SPEC §6).
     label: Option<(String, Option<LabelColor>)>,
+    /// The sidecar changed on disk while Blink had unsaved changes (FILE-8).
+    conflict: bool,
 }
 
 /// `0`–`9` of a (physical) digit key.
