@@ -10,6 +10,7 @@ use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
 use blink_runtime::fs::Fs;
 use blink_runtime::loader::{DEFAULT_CACHE_BYTES, Loaded, Loader, default_workers};
+use blink_runtime::sidecar::{SidecarService, SidecarStyle, SystemClock};
 use egui::{Color32, Key, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -88,6 +89,8 @@ pub struct Options {
     pub backend: Arc<dyn RawBackend>,
     pub workers: usize,
     pub cache_bytes: usize,
+    /// Name of new sidecars (D-3).
+    pub sidecar_style: SidecarStyle,
 }
 
 impl Default for Options {
@@ -97,6 +100,7 @@ impl Default for Options {
             backend: Arc::new(blink_decode::default_backend()),
             workers: default_workers(),
             cache_bytes: DEFAULT_CACHE_BYTES,
+            sidecar_style: SidecarStyle::default(),
         }
     }
 }
@@ -106,6 +110,8 @@ pub struct BlinkApp {
     state: State,
     fs: Arc<dyn Fs>,
     loader: Loader<Prepared>,
+    /// Sidecar writes on their own I/O thread (FILE-4..6).
+    sidecars: SidecarService,
     ctx: egui::Context,
     /// The context the loader wakes; follows the context the app is drawn in.
     wake_ctx: Arc<std::sync::Mutex<egui::Context>>,
@@ -161,10 +167,28 @@ impl BlinkApp {
                 c.request_repaint();
             }
         });
+        let (stx, wake) = (tx.clone(), wake_ctx.clone());
+        let sidecars = SidecarService::spawn(
+            opts.fs.clone(),
+            Arc::new(SystemClock),
+            opts.sidecar_style,
+            move |rep| {
+                if let Err(error) = rep.result {
+                    let _ = stx.send(Action::SidecarWriteFailed {
+                        source: rep.source,
+                        error,
+                    });
+                    if let Ok(c) = wake.lock() {
+                        c.request_repaint();
+                    }
+                }
+            },
+        );
         let mut app = Self {
             state: State::new(Formats::new(opts.backend.extensions())),
             fs: opts.fs,
             loader,
+            sidecars,
             ctx: ctx.clone(),
             wake_ctx,
             tx,
@@ -226,6 +250,11 @@ impl BlinkApp {
             .and_then(|s| self.drawable(&s.path, s.source));
     }
 
+    /// Write every queued sidecar change now and wait for it (tests, bench, exit).
+    pub fn flush_sidecars(&self) {
+        self.sidecars.flush();
+    }
+
     /// No decode job is queued or running.
     pub fn loader_idle(&self) -> bool {
         self.loader.idle()
@@ -276,8 +305,13 @@ impl BlinkApp {
                     Effect::ScanFolder { folder, recursive } => {
                         self.scan(folder.clone(), *recursive)
                     }
-                    // Sidecar writing arrives with FILE-4..6 (M3).
-                    Effect::WriteSidecar { .. } => {}
+                    Effect::WriteSidecar {
+                        source,
+                        change,
+                        owns_adobe_name,
+                    } => self
+                        .sidecars
+                        .queue(source.clone(), change.clone(), *owns_adobe_name),
                     Effect::Show { .. } | Effect::LoadFull { .. } => {
                         queue.extend(self.loader.execute(&e));
                     }
@@ -599,7 +633,7 @@ impl BlinkApp {
         let overlay = egui::UiBuilder::new()
             .max_rect(rect.shrink(8.0))
             .layout(egui::Layout::top_down(egui::Align::Min));
-        let marks = self.marks_text();
+        let marks = self.marks_shown();
         ui.scope_builder(overlay, |ui| {
             if let Some(b) = badge {
                 egui::Frame::NONE
@@ -615,12 +649,23 @@ impl BlinkApp {
                         );
                     });
             }
-            if let Some(text) = marks {
-                ui.label(
-                    egui::RichText::new(text)
-                        .size(16.0)
-                        .color(Color32::from_gray(230)),
-                );
+            if let Some((stars, rejected, label)) = marks {
+                ui.horizontal(|ui| {
+                    if stars > 0 {
+                        star_widget(ui, stars);
+                    }
+                    let text = |t: &str| {
+                        egui::RichText::new(t)
+                            .size(16.0)
+                            .color(Color32::from_gray(230))
+                    };
+                    if rejected {
+                        ui.label(text("REJECTED"));
+                    }
+                    if let Some(l) = label {
+                        ui.label(text(&l));
+                    }
+                });
             }
         });
         if self.state.loupe.pending_full {
@@ -645,21 +690,13 @@ impl BlinkApp {
         }
     }
 
-    fn marks_text(&self) -> Option<String> {
+    /// Rating and label of the current item for the overlay: (stars 1–5, rejected, label).
+    fn marks_shown(&self) -> Option<(u8, bool, Option<String>)> {
         let item = self.state.current_item()?;
         let m = self.state.marks.get(&item.primary.path)?;
-        let mut s = match m.rating {
-            Some(-1) => "REJECTED".to_string(),
-            Some(n) if n > 0 => "★".repeat(n as usize),
-            _ => String::new(),
-        };
-        if let Some(l) = &m.label {
-            if !s.is_empty() {
-                s.push_str("  ");
-            }
-            s.push_str(l);
-        }
-        (!s.is_empty()).then_some(s)
+        let stars = m.rating.filter(|&r| r > 0).map_or(0, |r| r as u8);
+        let rejected = m.rating == Some(-1);
+        (stars > 0 || rejected || m.label.is_some()).then(|| (stars, rejected, m.label.clone()))
     }
 
     /// What to draw for `path`, best first: the full-resolution image matching the shown
@@ -943,6 +980,44 @@ fn histogram_widget(ui: &mut egui::Ui, h: &blink_decode::stats::Histogram) {
 }
 
 /// Dark neutral theme (SPEC §5.1): chrome at or below 18 % grey, no tinted backgrounds.
+/// `n` painted stars (the default fonts have no star glyph), exposed to AccessKit as "n stars".
+fn star_widget(ui: &mut egui::Ui, n: u8) -> egui::Response {
+    const SIZE: f32 = 16.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(SIZE * f32::from(n), SIZE), Sense::hover());
+    let label = if n == 1 {
+        "1 star".to_string()
+    } else {
+        format!("{n} stars")
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
+    let painter = ui.painter_at(rect);
+    let color = Color32::from_gray(230);
+    for k in 0..n {
+        let c = rect.left_center() + Vec2::new(SIZE * (f32::from(k) + 0.5), 0.0);
+        let (outer, inner) = (SIZE * 0.48, SIZE * 0.2);
+        let pt = |i: usize, r: f32| {
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        };
+        // A star isn't convex: fill the inner pentagon and the five points separately.
+        let pentagon: Vec<Pos2> = (0..5).map(|i| pt(2 * i + 1, inner)).collect();
+        painter.add(egui::Shape::convex_polygon(
+            pentagon,
+            color,
+            egui::Stroke::NONE,
+        ));
+        for i in 0..5 {
+            let tri = vec![
+                pt((2 * i + 9) % 10, inner),
+                pt(2 * i, outer),
+                pt(2 * i + 1, inner),
+            ];
+            painter.add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
+        }
+    }
+    resp
+}
+
 pub fn apply_theme(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
 }

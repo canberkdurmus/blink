@@ -18,4 +18,5 @@ blink-decode = { path = "../blink-decode" }
 
 [dev-dependencies]
 blink-testkit = { path = "../blink-testkit" }
+blink-xmp = { path = "../blink-xmp" }
 toml = "1"

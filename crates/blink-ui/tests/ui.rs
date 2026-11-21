@@ -264,3 +264,30 @@ mod full_ui {
         h.snapshot("view_1_loupe_fit");
     }
 }
+
+#[test]
+fn req_rate_4_ratings_and_labels_from_sidecars_show_in_the_overlay() {
+    // Regression: the default fonts have no star glyph; a rated folder must not crash the UI.
+    let fs = folder(3);
+    fs.add_file(
+        "/f/IMG_0000.xmp",
+        blink_testkit::sidecars::lightroom(3, Some("Red")),
+    );
+    fs.add_file("/f/IMG_0001.xmp", blink_testkit::sidecars::darktable(-1));
+    let mut h = harness(fs, true);
+    let t = Instant::now();
+    while h.state().state().marks.is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut h);
+    assert!(h.query_by_label("3 stars").is_some());
+    assert!(h.query_by_label("Red").is_some());
+    h.state_mut().dispatch(blink_core::state::Action::Navigate(
+        blink_core::state::Nav::Next,
+    ));
+    settle(&mut h);
+    assert!(h.query_by_label("REJECTED").is_some());
+    assert!(h.query_by_label("3 stars").is_none());
+}

@@ -6,6 +6,7 @@ use blink_core::item::Item;
 use blink_core::state::{Action, Effect, MarkChange, Marks, State, reduce};
 use blink_decode::raw::RawBackend;
 use blink_runtime::fs::{Fs, RealFs};
+use blink_runtime::sidecar::{SidecarStyle, SidecarWriter, SystemClock};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -15,12 +16,13 @@ const USAGE: &str = "usage:
   blink-cli scan [-r] <folder>
   blink-cli list [-r] [--filter EXPR] <folder>
   blink-cli export [-r] [--filter EXPR] [--format txt|csv] <folder>
-  blink-cli rate --dry-run <file> <-1..5>
-  blink-cli label --dry-run <file> <Red|Yellow|Green|Blue|Purple|none>
+  blink-cli rate [--dry-run] [--style adobe|darktable] <file> <-1..5>
+  blink-cli label [--dry-run] [--style adobe|darktable] <file> <Red|Yellow|Green|Blue|Purple|none>
   blink-cli doctor <file>
   blink-cli doctor --formats
   blink-cli --version
 
+--style: name of new sidecars (default adobe: IMG.xmp; darktable: IMG.ARW.xmp).
 -r: include sub-folders. Filter EXPR: comma-separated, AND-combined:
   rating>=N, rating=N, rejected, !rejected, picked, label=NAME, kind=raw|dng|jpeg|heif";
 
@@ -41,6 +43,7 @@ struct Opts {
     filter: Filter,
     format: String,
     formats_flag: bool,
+    style: SidecarStyle,
     positional: Vec<String>,
 }
 
@@ -51,6 +54,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         filter: Filter::default(),
         format: "txt".into(),
         formats_flag: false,
+        style: SidecarStyle::default(),
         positional: Vec::new(),
     };
     let mut it = args.iter();
@@ -62,6 +66,13 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--filter" => {
                 let e = it.next().ok_or("--filter needs an expression")?;
                 o.filter = Filter::parse(e)?;
+            }
+            "--style" => {
+                o.style = match it.next().map(String::as_str) {
+                    Some("adobe") => SidecarStyle::Adobe,
+                    Some("darktable") => SidecarStyle::Darktable,
+                    _ => return Err("--style needs adobe or darktable".into()),
+                }
             }
             "--format" => o.format = it.next().ok_or("--format needs txt or csv")?.clone(),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -289,8 +300,8 @@ fn cmd_export(
     Ok(())
 }
 
-/// `rate` / `label`: plan the sidecar writes through the reducer. Writing sidecars arrives with
-/// FILE-4..6 (M3); until then only `--dry-run` is available (ADR 0010).
+/// `rate` / `label`: run the action through the reducer, like the GUI, and write the sidecar of
+/// every pair member (FILE-4..6). `--dry-run` prints the planned changes instead.
 fn cmd_mark(
     fs: &dyn Fs,
     backend: &dyn RawBackend,
@@ -337,31 +348,56 @@ fn cmd_mark(
         };
         Action::SetLabel { item: idx, label }
     };
-    if !o.dry_run {
-        return Err(
-            "writing sidecars arrives in M3 (FILE-4..6); use --dry-run to see the plan".into(),
-        );
-    }
-    // Same reducer as the GUI: print exactly the sidecar effects it plans.
+    // Same reducer as the GUI: exactly its sidecar effects are planned or written.
     let (_, effects) = reduce(&s, action);
+    let clock = SystemClock;
+    let mut writer = SidecarWriter::new(fs, &clock, o.style);
     for e in effects {
-        if let Effect::WriteSidecar { source, change } = e {
-            let change = match change {
-                MarkChange::Rating(r) => format!("set xmp:Rating={r}"),
-                MarkChange::Label(Some(l)) => format!("set xmp:Label={l}"),
-                MarkChange::Label(None) => "remove xmp:Label".into(),
-            };
-            let _ = writeln!(
-                out,
-                "would update sidecar of {}: {change}",
-                source
-                    .file_name()
-                    .map(|n| n.to_string_lossy())
-                    .unwrap_or_default()
-            );
+        if let Effect::WriteSidecar {
+            source,
+            change,
+            owns_adobe_name,
+        } = e
+        {
+            if o.dry_run {
+                let change = match &change {
+                    MarkChange::Rating(Some(r)) => format!("set xmp:Rating={r}"),
+                    MarkChange::Rating(None) => "remove xmp:Rating".into(),
+                    MarkChange::Label(Some(l)) => format!("set xmp:Label={l}"),
+                    MarkChange::Label(None) => "remove xmp:Label".into(),
+                };
+                let _ = writeln!(
+                    out,
+                    "would update sidecar of {}: {change}",
+                    name_of(&source)
+                );
+            } else {
+                writer.queue(source, change, owns_adobe_name, std::time::Instant::now());
+            }
         }
     }
-    Ok(())
+    let mut failed = Vec::new();
+    for rep in writer.flush_all() {
+        match rep.result {
+            Ok(()) => {
+                for p in &rep.sidecars {
+                    let _ = writeln!(out, "{}: updated {}", name_of(&rep.source), name_of(p));
+                }
+            }
+            Err(e) => failed.push(e),
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("\n"))
+    }
+}
+
+fn name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn ms(d: std::time::Duration) -> String {
@@ -633,6 +669,32 @@ mod tests {
                 | blink_runtime::fs::FsCall::Metadata(_)
                 | blink_runtime::fs::FsCall::ReadDir(_)
         )));
+    }
+
+    #[test]
+    fn req_cli_1_req_open_2_rate_and_label_write_a_sidecar_for_every_pair_member() {
+        let fs = fixture();
+        let (code, out) = cli(&fs, &["rate", "/f/a.ARW", "3"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(out, "a.ARW: updated a.xmp\na.JPG: updated a.JPG.xmp\n");
+        let (code, out) = cli(&fs, &["label", "--style", "darktable", "/f/a.JPG", "green"]);
+        assert_eq!(code, 0, "{out}");
+        for p in ["/f/a.xmp", "/f/a.JPG.xmp"] {
+            let got = blink_xmp::read_owned(&fs.peek(p).unwrap()).unwrap();
+            assert_eq!(got.rating, Some(3), "{p}");
+            assert_eq!(got.label.as_deref(), Some("Green"), "{p}");
+        }
+        // Read back through `list`, like a second session.
+        let (_, out) = cli(&fs, &["list", "--filter", "rating=3,label=Green", "/f"]);
+        assert!(out.contains("a.ARW"), "{out}");
+        // Only sidecars (and their temp files) were written.
+        for c in fs.calls().iter().filter(|c| c.is_write()) {
+            for p in c.changed_paths() {
+                let n = p.to_string_lossy();
+                assert!(n.ends_with(".xmp") || n.ends_with(".tmp"), "{c:?}");
+            }
+        }
+        assert_ne!(cli(&fs, &["rate", "--style", "x", "/f/a.ARW", "1"]).0, 0);
     }
 
     #[test]

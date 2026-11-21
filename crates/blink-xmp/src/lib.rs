@@ -3,6 +3,10 @@
 //! This crate performs no I/O: bytes in, bytes out (SPEC §8.2).
 #![forbid(unsafe_code)]
 
+mod write;
+
+pub use write::{Edit, OwnedEdit, iso8601_utc, new_sidecar, write_owned};
+
 use quick_xml::NsReader;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
