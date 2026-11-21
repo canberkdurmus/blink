@@ -118,6 +118,10 @@ pub struct BlinkApp {
     overlays: HashMap<Key2, OverlayCell>,
     /// Full-resolution tile builds running off the UI thread, by image.
     full_pending: HashMap<Key2, WeakLoaded>,
+    /// The one full-resolution tile builder (see [`full_builder`]).
+    full_tx: Sender<WeakLoaded>,
+    /// The item full-resolution tiles may be built for (shared with the builder).
+    full_current: Arc<std::sync::Mutex<Option<PathBuf>>>,
     overlay_textures: HashMap<Key2, Uploaded>,
     /// Histograms being computed off the UI thread, by image.
     hist_pending: HashMap<Key2, WeakLoaded>,
@@ -150,6 +154,13 @@ impl BlinkApp {
             },
         );
         let (tx, rx) = channel();
+        let wake = wake_ctx.clone();
+        let full_current = Arc::new(std::sync::Mutex::new(None));
+        let full_tx = full_builder(full_current.clone(), move || {
+            if let Ok(c) = wake.lock() {
+                c.request_repaint();
+            }
+        });
         let mut app = Self {
             state: State::new(Formats::new(opts.backend.extensions())),
             fs: opts.fs,
@@ -164,6 +175,8 @@ impl BlinkApp {
             overlay_textures: HashMap::new(),
             hist_pending: Default::default(),
             full_pending: Default::default(),
+            full_tx,
+            full_current,
             drawn: None,
             displayed: None,
             toast_at: 0.0,
@@ -198,6 +211,9 @@ impl BlinkApp {
     /// Choose (and upload) what the loupe draws: only the current item's pixels (PERF-3).
     fn choose_drawn(&mut self) {
         let current = self.state.current_item().map(|i| i.primary.path.clone());
+        if let Ok(mut c) = self.full_current.lock() {
+            c.clone_from(&current);
+        }
         self.drawn = self
             .state
             .loupe
@@ -306,6 +322,9 @@ impl BlinkApp {
             }
             self.textures.clear();
             self.overlay_textures.clear();
+            self.overlays.clear();
+            self.hist_pending.clear();
+            self.full_pending.clear();
             self.l1_order.clear();
         }
         self.pump();
@@ -710,12 +729,11 @@ impl BlinkApp {
                         .get(&k)
                         .is_some_and(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(l)));
                     if !same {
+                        // The builder drops requests for other items: forget them here too, so
+                        // coming back to one asks again.
+                        self.full_pending.retain(|(p, _), _| p == &l.path);
                         self.full_pending.insert(k, Arc::downgrade(l));
-                        let (src, ctx) = (l.clone(), self.ctx.clone());
-                        std::thread::spawn(move || {
-                            src.prepared.full_or_build(&src.preview.image);
-                            ctx.request_repaint();
-                        });
+                        let _ = self.full_tx.send(Arc::downgrade(l));
                     }
                     return false;
                 }
@@ -821,6 +839,44 @@ fn tile_rect(screen: Rect, size: (f32, f32), t: Geom) -> Rect {
 }
 
 /// `312 / 2,041` (SPEC §5.1).
+/// Start the single full-resolution tile builder. Of the pending requests it builds the newest
+/// one for the current item (requests for other items are dropped: the user moved on) and
+/// holds requests weakly, so an image the L2 cache evicted is skipped and its memory freed. At
+/// most one ~100 MB build runs at a time, beside the decode workers (PERF-3).
+fn full_builder(
+    current: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    wake: impl Fn() + Send + 'static,
+) -> Sender<WeakLoaded> {
+    let (tx, rx) = channel::<WeakLoaded>();
+    std::thread::Builder::new()
+        .name("blink-full-tiles".into())
+        .spawn(move || {
+            let mut pending: Vec<WeakLoaded> = Vec::new();
+            loop {
+                if pending.is_empty() {
+                    match rx.recv() {
+                        Ok(w) => pending.push(w),
+                        Err(_) => return,
+                    }
+                }
+                pending.extend(rx.try_iter());
+                let cur = current.lock().ok().and_then(|c| c.clone());
+                pending.retain(|w| {
+                    w.upgrade().is_some_and(|l| {
+                        Some(&l.path) == cur.as_ref() && l.prepared.full().is_none()
+                    })
+                });
+                if let Some(l) = pending.pop().and_then(|w| w.upgrade()) {
+                    l.prepared.full_or_build(&l.preview.image);
+                    drop(l);
+                    wake();
+                }
+            }
+        })
+        .expect("spawn full-tile builder");
+    tx
+}
+
 pub fn counter(current: Option<usize>, len: usize) -> String {
     match current {
         Some(i) if len > 0 => format!("{} / {}", thousands(i + 1), thousands(len)),

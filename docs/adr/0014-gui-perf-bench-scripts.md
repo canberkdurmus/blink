@@ -32,7 +32,8 @@ JSON results. `cargo xtask bench` runs the standard scripts and compares with
   - PERF-5 `raw_decode`: the 45 MP class file in the corpus (Sony ILCE-1M2, 8640×5760) carries a
     **full-size** embedded preview, so VIEW-4 correctly never decodes it on zoom. The script
     therefore dispatches `Action::DecodeRaw` (an explicit "decode the RAW now"; it ignores a
-    paired JPEG) and measures until the RAW decode is drawn, including tiled upload. It also
+    paired JPEG) together with zoom 100 %, and measures until the RAW decode is drawn **with every
+    pixel** (`Displayed::pixels == size`), including the full-resolution tile build and upload. It also
     reports the longest UI frame meanwhile as `PERF-5/frame` (budget 33 ms).
 - **Synthetic folder for PERF-1/2/3**: `blink_testkit::fixtures::perf_folder(2000)` creates 2,000
   `.ARW` hard links (copies where links fail) to one TIFF-container file with the 6000×4000
@@ -44,11 +45,23 @@ JSON results. `cargo xtask bench` runs the standard scripts and compares with
   - Histograms are computed lazily (`Loaded::histogram`, on all cores, off the UI thread, only
     when the info panel shows them) and not for every prefetched item.
   - Texture tiles are built in parallel.
+  - **Screen-resolution variant** (SPEC §8.3 "navigate at screen resolution"): an image whose
+    long edge exceeds 2,560 px is prepared as box-filtered tiles of at most 2,560 px. The loupe
+    draws them while the image is shown no larger than that, and its real pixels otherwise
+    (zoom, or a loupe wider than 2,560 px). Full-resolution tiles are built on demand by **one**
+    builder thread that holds requests weakly and builds only the newest request for the current
+    item, so holding → at 100 % never runs several ~100 MB builds at once. While they build, the
+    best complete variant stays on screen.
+  - `Loader::clear()` (folder reopened) bumps an epoch: jobs started before it finish but never
+    fill the cache or report, and don't count as "already running" for the next `Show`.
 
 ## Consequences
 
 - Local numbers (Ryzen 7 PRO 7840U): PERF-1 192 ms, PERF-2 0.6 ms, PERF-3 25 ms/item (every key
   repeat drawn, 0 stale frames), PERF-5 748 ms, longest frame 0.9 ms.
+- CI runners (4 cores, no GPU) are much slower than the reference-class laptop (e.g. PERF-3
+  ~270 ms/item, PERF-5 ~2.1 s). Per SPEC §7 their numbers are **regression baselines**; the
+  absolute budgets are judged on the reference-class machine (as for PERF-4, M1 report).
 - The gate report asks the owner to confirm the absolute budgets on real hardware with a GPU
   (HUMAN_TODO).
 - `DecodeRaw` is not bound to a key in v1. It exists for honest measurement and stays covered

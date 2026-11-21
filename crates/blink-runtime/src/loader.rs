@@ -128,6 +128,8 @@ impl<T> Cache<T> {
 struct Job {
     item: ItemRef,
     generation: u64,
+    /// [`Shared::epoch`] when queued: a job from before a [`Loader::clear`] never reports.
+    epoch: u64,
 }
 
 struct Shared<T> {
@@ -141,6 +143,8 @@ struct Shared<T> {
     full_cv: Condvar,
     cache: Mutex<Cache<T>>,
     generation: AtomicU64,
+    /// Bumped by [`Loader::clear`]: results of jobs started before it are dropped.
+    epoch: AtomicU64,
     /// Primary path of the current item (pinned in the cache, never cancelled).
     current: Mutex<Option<PathBuf>>,
     results: Mutex<Sender<Action>>,
@@ -153,14 +157,14 @@ struct Shared<T> {
 struct Queue {
     jobs: VecDeque<Job>,
     wanted: std::collections::HashSet<PathBuf>,
-    /// Paths with a job running right now (not re-queued by a new Show).
-    running: Vec<PathBuf>,
+    /// Paths with a job running right now (not re-queued by a new Show), with the job's epoch.
+    running: Vec<(PathBuf, u64)>,
     shutdown: bool,
 }
 
 #[derive(Default)]
 struct FullSlot {
-    next: Option<ItemRef>,
+    next: Option<(ItemRef, u64)>,
     shutdown: bool,
 }
 
@@ -202,6 +206,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
                 cap: cache_bytes,
             }),
             generation: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
             current: Mutex::new(None),
             results: Mutex::new(tx),
         });
@@ -237,16 +242,22 @@ impl<T: Send + Sync + 'static> Loader<T> {
         *lock(&self.shared.current) = Some(current.path.clone());
         let mut q = lock(&self.shared.queue);
         let mut cache = lock(&self.shared.cache);
+        let epoch = self.shared.epoch.load(Ordering::SeqCst);
         let hit = cache.get(&(current.path.clone(), Level::Preview));
         let mut jobs = VecDeque::new();
         q.wanted.clear();
         for item in std::iter::once(current).chain(prefetch) {
             q.wanted.insert(item.path.clone());
             let cached = cache.get(&(item.path.clone(), Level::Preview)).is_some();
-            if !cached && !q.running.contains(&item.path) {
+            let running = q
+                .running
+                .iter()
+                .any(|(p, e)| p == &item.path && *e == epoch);
+            if !cached && !running {
                 jobs.push_back(Job {
                     item: item.clone(),
                     generation: g,
+                    epoch,
                 });
             }
         }
@@ -263,7 +274,8 @@ impl<T: Send + Sync + 'static> Loader<T> {
         if let Some(l) = lock(&self.shared.cache).get(&(item.path.clone(), Level::Full)) {
             return Some(l.ready());
         }
-        lock(&self.shared.full).next = Some(item.clone());
+        let epoch = self.shared.epoch.load(Ordering::SeqCst);
+        lock(&self.shared.full).next = Some((item.clone(), epoch));
         self.shared.full_cv.notify_all();
         None
     }
@@ -305,9 +317,10 @@ impl<T: Send + Sync + 'static> Loader<T> {
     }
 
     /// Forget everything: cancel queued jobs and empty the cache (a folder was (re)opened, its
-    /// files may have changed on disk). A running full-resolution load still reports back; the
-    /// reducer ignores it unless it matches the current item.
+    /// files may have changed on disk). Jobs already running finish but neither fill the cache
+    /// nor report: their bytes may be from before the reopen.
     pub fn clear(&self) {
+        self.shared.epoch.fetch_add(1, Ordering::SeqCst);
         self.shared.generation.fetch_add(1, Ordering::SeqCst);
         let mut q = lock(&self.shared.queue);
         q.jobs.clear();
@@ -360,7 +373,7 @@ fn worker<T>(s: &Shared<T>) {
                     return;
                 }
                 if let Some(j) = q.jobs.pop_front() {
-                    q.running.push(j.item.path.clone());
+                    q.running.push((j.item.path.clone(), j.epoch));
                     // Share the cores between the jobs running now: an idle loader decodes
                     // the current item on all of them, a busy one doesn't oversubscribe.
                     let threads = (cores() / q.running.len()).max(1);
@@ -371,14 +384,30 @@ fn worker<T>(s: &Shared<T>) {
         };
         let (job, threads) = job;
         let result = load_preview(s, &job, threads);
-        let leave = || lock(&s.queue).running.retain(|p| p != &job.item.path);
+        let leave = || {
+            lock(&s.queue)
+                .running
+                .retain(|(p, e)| !(p == &job.item.path && *e == job.epoch))
+        };
         match result {
             Some(Ok(l)) => {
                 let a = l.ready();
-                lock(&s.cache).insert(Arc::new(l), &pinned(s));
+                let pinned = pinned(s);
+                let fresh = {
+                    // Checked under the cache lock, which `clear()` takes after bumping the epoch.
+                    let mut c = lock(&s.cache);
+                    let fresh = job.epoch == s.epoch.load(Ordering::SeqCst);
+                    if fresh {
+                        c.insert(Arc::new(l), &pinned);
+                    }
+                    fresh
+                };
                 leave(); // after the insert: `show()` sees it cached or running, never neither
-                send(s, a);
+                if fresh {
+                    send(s, a);
+                }
             }
+            Some(Err(_)) if job.epoch != s.epoch.load(Ordering::SeqCst) => leave(),
             Some(Err(error)) => {
                 leave();
                 send(
@@ -408,10 +437,13 @@ fn pinned<T>(s: &Shared<T>) -> Vec<Key> {
 /// job leaves `running` under the same lock, atomically with the decision.
 fn is_stale<T>(s: &Shared<T>, job: &Job) -> bool {
     let mut q = lock(&s.queue);
-    let stale =
-        job.generation != s.generation.load(Ordering::SeqCst) && !q.wanted.contains(&job.item.path);
+    let cleared = job.epoch != s.epoch.load(Ordering::SeqCst);
+    let stale = cleared
+        || (job.generation != s.generation.load(Ordering::SeqCst)
+            && !q.wanted.contains(&job.item.path));
     if stale {
-        q.running.retain(|p| p != &job.item.path);
+        q.running
+            .retain(|(p, e)| !(p == &job.item.path && *e == job.epoch));
     }
     stale
 }
@@ -517,11 +549,18 @@ fn full_worker<T>(s: &Shared<T>) {
                 slot = s.full_cv.wait(slot).unwrap_or_else(|e| e.into_inner());
             }
         };
+        let (item, epoch) = item;
         let result = load_full(s, &item);
+        let pinned = pinned(s);
+        let mut c = lock(&s.cache);
+        if epoch != s.epoch.load(Ordering::SeqCst) {
+            continue; // a `clear()` happened meanwhile: the bytes may be outdated
+        }
         match result {
             Ok(l) => {
                 let a = l.ready();
-                lock(&s.cache).insert(Arc::new(l), &pinned(s));
+                c.insert(Arc::new(l), &pinned);
+                drop(c);
                 send(s, a);
             }
             Err(error) => send(

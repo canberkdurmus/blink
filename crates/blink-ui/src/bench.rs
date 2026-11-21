@@ -278,14 +278,18 @@ pub fn run(script: &Script, folder: &Path, opts: impl Fn() -> Options) -> Result
                 h.longest_frame = Duration::ZERO;
                 let t = Instant::now();
                 // The A1 II class files carry a full-size preview, so zoom alone wouldn't
-                // decode: request the RAW decode explicitly (ADR 0014).
+                // decode: request the RAW decode explicitly (ADR 0014). Done when the decode is
+                // drawn at 100 % with every pixel (full-resolution tiles built and uploaded).
+                h.app.dispatch(blink_core::state::Action::SetZoom {
+                    zoom: blink_core::view::Zoom::P100,
+                    cursor: None,
+                });
                 h.app.decode_raw();
                 h.frame(&[]);
                 loop {
-                    let drawn_raw = h
-                        .app
-                        .displayed()
-                        .is_some_and(|d| d.source == PreviewSource::RawDecode);
+                    let drawn_raw = h.app.displayed().is_some_and(|d| {
+                        d.source == PreviewSource::RawDecode && d.pixels == d.size
+                    });
                     if drawn_raw {
                         break;
                     }
@@ -305,7 +309,11 @@ pub fn run(script: &Script, folder: &Path, opts: impl Fn() -> Options) -> Result
                 frames.push(ms(h.longest_frame));
             }
             vec![
-                metric("zoom to RAW decode drawn, 45 MP class", 1500.0, decode),
+                metric(
+                    "zoom to 100 % until the RAW decode is drawn with every pixel, 45 MP class",
+                    1500.0,
+                    decode,
+                ),
                 Measured {
                     id: format!("{}/frame", script.id),
                     metric: "longest UI frame during the RAW decode".into(),
