@@ -54,9 +54,9 @@ green nightly darktable interop runs in a row (SPEC §13).
 
 ## M3 Ratings and sidecars
 
-- [ ] RATE-1
-- [ ] RATE-2
-- [ ] RATE-3
+- [x] RATE-1 — `req_rate_1_each_key_sets_stars_reject_or_a_label`, `req_rate_1_auto_advance_moves_to_the_next_item_after_a_mark`, `req_rate_1_req_rate_3_mark_keys_write_sidecars_and_ctrl_z_takes_them_back` (UI), XMP round trip `req_file_5_req_file_9_req_rate_1_exiftool_reads_written_sidecars` (#18, ADR 0016)
+- [x] RATE-2 — `req_rate_2_pick_uses_the_configured_value_and_unpick_only_clears_it`, `req_rate_2_pick_value_is_configurable_1_to_5_and_defaults_to_1`, `req_rate_2_config_sets_auto_advance_labels_and_style_and_reports_problems`, `req_rate_2_config_is_read_from_the_config_dir_and_missing_means_defaults` (#18)
+- [x] RATE-3 — `req_rate_3_any_actions_then_undo_all_restore_every_sidecar_byte_for_byte` (proptest), `req_rate_3_undo_all_after_a_full_pass_with_writes_flushed_each_step`, `req_rate_3_undo_and_redo_walk_the_history_and_return_to_the_item`, `req_rate_3_undo_reaches_items_a_rescan_dropped`, `req_rate_3_undo_of_a_mark_set_before_the_marks_loaded_shows_the_files_value` (#18) · file-operation undo joins in M4 (ADR 0016)
 - [x] FILE-4 — `req_file_4_fixture_matrix`, `req_file_4_unpaired_same_stem_files_never_share_a_sidecar`, `req_open_2_req_file_4_every_pair_member_gets_its_own_sidecar_with_the_same_values` (#16, ADR 0015)
 - [x] FILE-5 — `req_file_5_generated_foreign_xmp_is_preserved` (property), `req_file_5_app_sidecars_keep_every_foreign_field`, `req_file_5_bytes_outside_owned_fields_are_untouched`, `req_file_5_keeps_attribute_or_element_form_per_field`, `req_file_5_a_foreign_xmp_prefix_is_not_shadowed`, `req_file_5_a_leading_bom_is_kept_and_positions_stay_right`, `req_file_5_another_apps_later_changes_are_never_restored_over`, `req_file_5_req_file_9_req_rate_1_exiftool_reads_written_sidecars` (oracle) (#16)
 - [x] FILE-6 — `req_file_6_crash_at_every_step_leaves_the_old_or_the_new_sidecar`, `req_file_6_crash_while_updating_both_styles_leaves_each_old_or_new`, `req_file_6_the_memfs_model_catches_a_writer_that_skips_fsync`, `req_file_6_write_is_temp_fsync_rename_fsync_dir_in_the_same_directory`, `req_file_6_rating_writes_are_debounced_and_coalesced_within_250_ms`, `req_file_6_real_fs_atomic_write_replaces_and_leaves_no_temp_file`, `req_file_6_failed_writes_back_off` (#16, green on all 6 targets: run 44911226524)
