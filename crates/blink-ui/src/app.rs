@@ -5,7 +5,9 @@
 use crate::tiles::{self, Prepared, Tile};
 use blink_core::formats::Formats;
 use blink_core::preview::PreviewSource;
-use blink_core::state::{Action, Effect, Level, Nav, State, reduce};
+use blink_core::state::{
+    Action, Effect, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
+};
 use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
 use blink_runtime::fs::Fs;
@@ -91,6 +93,10 @@ pub struct Options {
     pub cache_bytes: usize,
     /// Name of new sidecars (D-3).
     pub sidecar_style: SidecarStyle,
+    /// Pick value, auto-advance, label names (RATE-1, RATE-2; from the config file).
+    pub marks: MarkPrefs,
+    /// Shown in the toast area at start (e.g. problems in the config file).
+    pub notice: Option<String>,
 }
 
 impl Default for Options {
@@ -101,6 +107,8 @@ impl Default for Options {
             workers: default_workers(),
             cache_bytes: DEFAULT_CACHE_BYTES,
             sidecar_style: SidecarStyle::default(),
+            marks: MarkPrefs::default(),
+            notice: None,
         }
     }
 }
@@ -184,8 +192,11 @@ impl BlinkApp {
                 }
             },
         );
+        let mut state = State::new(Formats::new(opts.backend.extensions()));
+        state.prefs = opts.marks;
+        state.toast = opts.notice;
         let mut app = Self {
-            state: State::new(Formats::new(opts.backend.extensions())),
+            state,
             fs: opts.fs,
             loader,
             sidecars,
@@ -392,14 +403,36 @@ impl BlinkApp {
         for ev in events {
             let egui::Event::Key {
                 key,
+                physical_key,
                 pressed: true,
+                repeat,
                 modifiers: m,
-                ..
             } = ev
             else {
                 continue;
             };
+            let plain = !m.command && !m.alt;
+            let digit = physical_key.unwrap_or(key);
+            let mark = |k| (!repeat).then_some(Action::Mark(k));
             let a = match key {
+                // Undo / redo (RATE-3), `Cmd` on macOS.
+                Key::Z if m.command && m.shift => Some(Action::Redo),
+                Key::Z if m.command => Some(Action::Undo),
+                // Stars, labels (RATE-1); `Shift+9` is purple whatever the layout makes of it.
+                _ if plain && m.shift && digit == Key::Num9 => {
+                    mark(MarkKey::Label(LabelColor::Purple))
+                }
+                _ if plain && digit_value(digit).is_some_and(|d| d <= 5) && !m.shift => {
+                    mark(MarkKey::Stars(digit_value(digit).unwrap_or(0)))
+                }
+                _ if plain && !m.shift && digit_value(digit).is_some() => {
+                    let c = digit_value(digit).unwrap_or(6) as usize - 6;
+                    mark(MarkKey::Label(LabelColor::ALL[c]))
+                }
+                Key::P if plain => mark(MarkKey::Pick),
+                Key::X if plain => mark(MarkKey::Reject),
+                Key::U if plain => mark(MarkKey::Unflag),
+                Key::A if plain && m.shift => Some(Action::ToggleAutoAdvance),
                 Key::ArrowRight => Some(Action::Navigate(Nav::Next)),
                 Key::ArrowLeft => Some(Action::Navigate(Nav::Prev)),
                 Key::Space if m.shift => Some(Action::Navigate(Nav::Prev)),
@@ -492,6 +525,14 @@ impl BlinkApp {
                     .changed()
                 {
                     actions.push(Action::SetKeepZoom(keep));
+                }
+                let mut adv = self.state.prefs.auto_advance;
+                if ui
+                    .checkbox(&mut adv, "Auto-advance")
+                    .on_hover_text("Move to the next item after rating (Shift+A)")
+                    .changed()
+                {
+                    actions.push(Action::ToggleAutoAdvance);
                 }
                 let mut clip = self.state.loupe.clipping;
                 if ui.checkbox(&mut clip, "Clipping (J)").changed() {
@@ -649,20 +690,27 @@ impl BlinkApp {
                         );
                     });
             }
-            if let Some((stars, rejected, label)) = marks {
+            if let Some(o) = marks {
                 ui.horizontal(|ui| {
-                    if stars > 0 {
-                        star_widget(ui, stars);
+                    if o.stars > 0 {
+                        star_widget(ui, o.stars);
                     }
                     let text = |t: &str| {
                         egui::RichText::new(t)
                             .size(16.0)
                             .color(Color32::from_gray(230))
                     };
-                    if rejected {
+                    if o.picked {
+                        ui.label(text("PICK"));
+                    }
+                    if o.rejected {
                         ui.label(text("REJECTED"));
                     }
-                    if let Some(l) = label {
+                    if let Some((l, c)) = o.label {
+                        if let Some(c) = c {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 6.0, label_color(c));
+                        }
                         ui.label(text(&l));
                     }
                 });
@@ -690,13 +738,20 @@ impl BlinkApp {
         }
     }
 
-    /// Rating and label of the current item for the overlay: (stars 1–5, rejected, label).
-    fn marks_shown(&self) -> Option<(u8, bool, Option<String>)> {
+    /// Rating, pick/reject and label of the current item for the overlay (SPEC §5.1).
+    fn marks_shown(&self) -> Option<Overlay> {
         let item = self.state.current_item()?;
         let m = self.state.marks.get(&item.primary.path)?;
-        let stars = m.rating.filter(|&r| r > 0).map_or(0, |r| r as u8);
-        let rejected = m.rating == Some(-1);
-        (stars > 0 || rejected || m.label.is_some()).then(|| (stars, rejected, m.label.clone()))
+        let o = Overlay {
+            stars: m.rating.filter(|&r| r > 0).map_or(0, |r| r as u8),
+            picked: m.rating == Some(self.state.prefs.pick_value),
+            rejected: m.rating == Some(-1),
+            label: m.label.clone().map(|l| {
+                let c = self.state.prefs.color_of(&l);
+                (l, c)
+            }),
+        };
+        (o.stars > 0 || o.rejected || o.label.is_some()).then_some(o)
     }
 
     /// What to draw for `path`, best first: the full-resolution image matching the shown
@@ -869,6 +924,45 @@ impl BlinkApp {
                 Color32::WHITE,
             );
         }
+    }
+}
+
+/// What the loupe overlay shows about the current item's marks.
+struct Overlay {
+    stars: u8,
+    picked: bool,
+    rejected: bool,
+    /// Stored label and the colour it names (configured names, SPEC §6).
+    label: Option<(String, Option<LabelColor>)>,
+}
+
+/// `0`–`9` of a (physical) digit key.
+fn digit_value(k: Key) -> Option<u8> {
+    let n = [
+        Key::Num0,
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ]
+    .iter()
+    .position(|&d| d == k)?;
+    Some(n as u8)
+}
+
+/// Swatch colour of a label.
+fn label_color(c: LabelColor) -> Color32 {
+    match c {
+        LabelColor::Red => Color32::from_rgb(220, 50, 47),
+        LabelColor::Yellow => Color32::from_rgb(230, 200, 40),
+        LabelColor::Green => Color32::from_rgb(70, 180, 70),
+        LabelColor::Blue => Color32::from_rgb(50, 120, 230),
+        LabelColor::Purple => Color32::from_rgb(150, 80, 200),
     }
 }
 

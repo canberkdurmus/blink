@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 49ca8ba955c9dadb72fd16cdbc08702964f04d2ccc0bdb7e3fd2e68bed9d3d46 # shrinks to steps = [Do(ToggleAutoAdvance), Do(Mark(Stars(0))), Do(Mark(Stars(0))), Do(Mark(Stars(0)))], darktable = false, pick = 1
+cc 884badc9b10ff1352df8ed16b84535ca4dc84573b216c603ec41e12d7f2352f0 # shrinks to steps = [Do(Mark(Stars(0))), Do(Mark(Stars(0))), Do(Mark(Stars(0))), Do(Mark(Stars(0))), Do(Navigate(Next)), Do(ToggleAutoAdvance), Do(Mark(Stars(0))), Do(Mark(Stars(0))), Do(Mark(Stars(1))), Wait(100), Do(SetRecursive(false))], darktable = false, pick = 1

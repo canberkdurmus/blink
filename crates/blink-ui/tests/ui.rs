@@ -291,3 +291,73 @@ fn req_rate_4_ratings_and_labels_from_sidecars_show_in_the_overlay() {
     assert!(h.query_by_label("REJECTED").is_some());
     assert!(h.query_by_label("3 stars").is_none());
 }
+
+#[test]
+fn req_rate_1_req_rate_3_mark_keys_write_sidecars_and_ctrl_z_takes_them_back() {
+    use egui::{Key, Modifiers};
+    let fs = Arc::new(folder(3));
+    fs.add_file(
+        "/f/IMG_0001.xmp",
+        blink_testkit::sidecars::lightroom(2, None),
+    );
+    let before = fs.peek("/f/IMG_0001.xmp");
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    let t = Instant::now();
+    while h.state().state().marks.is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut h);
+    let owned = |p: &str| fs.peek(p).map(|b| blink_xmp::read_owned(&b).unwrap());
+    h.key_press(Key::Num3);
+    h.key_press(Key::Num7);
+    h.step();
+    assert!(h.query_by_label("3 stars").is_some());
+    assert!(h.query_by_label("Yellow").is_some());
+    h.state().flush_sidecars();
+    let o = owned("/f/IMG_0000.xmp").expect("created");
+    assert_eq!((o.rating, o.label.as_deref()), (Some(3), Some("Yellow")));
+    // Shift+9 is purple; P picks (1 star by default) and the overlay says so.
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Num9);
+    h.key_press(Key::P);
+    h.step();
+    assert!(h.query_by_label("PICK").is_some());
+    assert!(h.query_by_label("Purple").is_some());
+    // Shift+A: auto-advance; X rejects the item and moves on.
+    h.key_press_modifiers(Modifiers::SHIFT, Key::A);
+    h.key_press(Key::X);
+    h.step();
+    assert_eq!(h.state().state().current, Some(1));
+    h.key_press(Key::Num5);
+    h.step();
+    assert_eq!(h.state().state().current, Some(2));
+    h.state().flush_sidecars();
+    assert_eq!(owned("/f/IMG_0000.xmp").unwrap().rating, Some(-1));
+    assert_eq!(owned("/f/IMG_0001.xmp").unwrap().rating, Some(5));
+    // Undo everything: both sidecars are back byte for byte (the new one is gone).
+    for _ in 0..6 {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        h.step();
+    }
+    assert_eq!(h.state().state().current, Some(0));
+    h.state().flush_sidecars();
+    assert_eq!(fs.peek("/f/IMG_0000.xmp"), None);
+    assert_eq!(fs.peek("/f/IMG_0001.xmp"), before);
+    // Redo brings the first change back.
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.step();
+    h.state().flush_sidecars();
+    assert_eq!(owned("/f/IMG_0000.xmp").unwrap().rating, Some(3));
+}

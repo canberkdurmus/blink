@@ -542,6 +542,8 @@ dependencies = [
  "blink-testkit",
  "blink-xmp",
  "directories",
+ "proptest",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]
@@ -561,6 +563,7 @@ dependencies = [
  "blink-decode",
  "blink-runtime",
  "blink-testkit",
+ "blink-xmp",
  "eframe",
  "egui",
  "egui_kittest",
