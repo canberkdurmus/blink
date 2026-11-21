@@ -128,7 +128,7 @@ fn req_view_1_first_item_shows_its_embedded_preview_and_neighbours_are_prefetche
     assert_eq!((shown.size, shown.full_size), ((160, 120), (400, 300)));
     let l = s.loupe_loaded("/f/a.ARW");
     assert_eq!(l.prepared, (160, 120));
-    assert_eq!(l.histogram.source, PreviewSource::EmbeddedLowRes);
+    assert_eq!(l.histogram().source, PreviewSource::EmbeddedLowRes);
     // Prefetched: moving on is answered from the cache in the same dispatch.
     let t = std::time::Instant::now();
     while !(s
@@ -299,4 +299,118 @@ fn req_view_1_a_running_prefetch_still_wanted_by_a_newer_show_is_not_dropped() {
         assert!(t.elapsed() < Duration::from_secs(20), "c was dropped");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn loader_clear_forgets_cached_images() {
+    let fs = MemFs::new();
+    fs.add_file("/f/a.ARW", low_res_raw());
+    let loader: Loader<()> =
+        Loader::new(Arc::new(fs), Arc::new(FakeRaw), 1, 1 << 30, |_| (), || {});
+    let item = blink_core::state::ItemRef {
+        path: "/f/a.ARW".into(),
+        kind: blink_core::formats::FileKind::Raw,
+        paired_jpeg: None,
+    };
+    loader.show(&item, &[]);
+    loader.wait(Duration::from_secs(20)).expect("loaded");
+    assert!(loader.get(Path::new("/f/a.ARW"), Level::Preview).is_some());
+    loader.clear();
+    assert!(loader.get(Path::new("/f/a.ARW"), Level::Preview).is_none());
+    assert_eq!(loader.cache_bytes(), 0);
+    assert!(
+        loader.show(&item, &[]).is_none(),
+        "re-read, not answered from the old cache"
+    );
+}
+
+/// An Fs that reads a file's bytes, then blocks while the gate is closed (a read that got its
+/// bytes before the file changed on disk).
+struct SnapshotGateFs {
+    inner: MemFs,
+    open: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+    entered: std::sync::atomic::AtomicUsize,
+}
+
+impl blink_runtime::fs::Fs for SnapshotGateFs {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        let bytes = self.inner.read(path);
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.cv.wait(open).unwrap();
+        }
+        bytes
+    }
+    fn metadata(&self, path: &Path) -> std::io::Result<blink_runtime::fs::Meta> {
+        self.inner.metadata(path)
+    }
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<blink_runtime::fs::DirEntry>> {
+        self.inner.read_dir(path)
+    }
+}
+
+impl SnapshotGateFs {
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+/// Opens the gate when dropped, so a failing assertion doesn't leave workers blocked forever.
+struct Release(Arc<SnapshotGateFs>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[test]
+fn req_view_1_a_load_in_flight_during_clear_never_fills_the_cache() {
+    let preview =
+        |w: u32, h: u32| tiff_with_jpegs(&[jpeg(&quadrants(w, h, [[9, 9, 9]; 4]), w, h, 95, None)]);
+    let inner = MemFs::new();
+    inner.add_file("/f/a.ARW", preview(160, 120));
+    let fs = Arc::new(SnapshotGateFs {
+        inner,
+        open: std::sync::Mutex::new(false),
+        cv: std::sync::Condvar::new(),
+        entered: Default::default(),
+    });
+    let loader: Loader<()> = Loader::new(fs.clone(), Arc::new(FakeRaw), 2, 1 << 30, |_| (), || {});
+    let _release = Release(fs.clone()); // dropped before the loader
+    let item = blink_core::state::ItemRef {
+        path: "/f/a.ARW".into(),
+        kind: blink_core::formats::FileKind::Raw,
+        paired_jpeg: None,
+    };
+    let entered = |n: usize| {
+        let t = std::time::Instant::now();
+        while fs.entered.load(std::sync::atomic::Ordering::SeqCst) < n {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "{n} reads never started"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    loader.show(&item, &[]);
+    entered(1); // the old bytes are read, the job is in flight
+    fs.inner.add_file("/f/a.ARW", preview(80, 60)); // the file changes on disk
+    loader.clear(); // the folder is reopened
+    loader.show(&item, &[]);
+    entered(2); // a new job reads the new bytes (not skipped as "already running")
+    fs.release();
+    let t = std::time::Instant::now();
+    while !loader.idle() {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let l = loader
+        .get(Path::new("/f/a.ARW"), Level::Preview)
+        .expect("loaded");
+    assert_eq!((l.preview.image.width, l.preview.image.height), (80, 60));
 }

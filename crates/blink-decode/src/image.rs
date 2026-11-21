@@ -51,11 +51,20 @@ const PARALLEL_MIN_BYTES: usize = 128 * 1024;
 /// Decode a JPEG to 8-bit RGB. Large baseline JPEGs are decoded on several threads
 /// (`pjpeg`, ADR 0011); everything else, and anything `pjpeg` rejects, goes through zune-jpeg.
 pub fn decode_jpeg(bytes: &[u8]) -> Result<DecodedJpeg, DecodeError> {
-    if bytes.len() >= PARALLEL_MIN_BYTES {
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        if let Some(d) = decode_jpeg_parallel(bytes, threads) {
-            return Ok(d);
-        }
+    decode_jpeg_threads(
+        bytes,
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+    )
+}
+
+/// [`decode_jpeg`] with at most `threads` threads for one file (the loader shares the cores
+/// between the jobs it runs at once).
+pub fn decode_jpeg_threads(bytes: &[u8], threads: usize) -> Result<DecodedJpeg, DecodeError> {
+    if bytes.len() >= PARALLEL_MIN_BYTES
+        && threads > 1
+        && let Some(d) = decode_jpeg_parallel(bytes, threads)
+    {
+        return Ok(d);
     }
     decode_jpeg_zune(bytes)
 }

@@ -15,3 +15,10 @@ workspace = true
 blink-core.workspace = true
 eframe.workspace = true
 egui.workspace = true
+blink-runtime.workspace = true
+blink-decode = { path = "../blink-decode" }
+rfd = "=0.18.0"
+
+[dev-dependencies]
+blink-testkit = { path = "../blink-testkit" }
+egui_kittest = { version = "=0.37.0", features = ["wgpu", "snapshot"] }

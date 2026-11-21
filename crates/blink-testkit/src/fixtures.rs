@@ -257,3 +257,41 @@ pub fn perf_jpeg_6mb() -> Vec<u8> {
         .expect("encode jpeg");
     out
 }
+
+/// A folder of `n` RAW stand-ins for the GUI bench scripts (PERF-1/2/3), created once under
+/// `target/perf-fixtures/` and reused: `IMG_0000.ARW`… are hard links to one TIFF-container file
+/// with a 160×120 thumbnail and the 6000×4000, ~6 MB JPEG preview of PERF-4 (24 MP class).
+/// Hard links keep the folder at one file's size on disk; every name is still a separate item.
+pub fn perf_folder(n: usize) -> std::path::PathBuf {
+    let dir = crate::corpus::workspace_root()
+        .join("target")
+        .join("perf-fixtures")
+        .join(format!("raw-{n}"));
+    if dir.join(".complete").exists() {
+        return dir;
+    }
+    // Several test processes may ask at once: each builds its own temp folder and renames it
+    // into place. A folder another process may be reading is never deleted.
+    let tmp = dir.with_file_name(format!("raw-{n}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create perf folder");
+    let thumb = jpeg(&[128; 160 * 120 * 3], 160, 120, 80, None);
+    let src = tmp.join("source.bin");
+    std::fs::write(&src, tiff_with_jpegs(&[thumb, perf_jpeg_6mb()])).expect("write perf file");
+    for i in 0..n {
+        let p = tmp.join(format!("IMG_{i:04}.ARW"));
+        if std::fs::hard_link(&src, &p).is_err() {
+            std::fs::copy(&src, &p).expect("copy perf file");
+        }
+    }
+    std::fs::write(tmp.join(".complete"), b"").expect("mark perf folder");
+    if std::fs::rename(&tmp, &dir).is_err() {
+        // Another process won the race (or a stale incomplete folder is in the way).
+        let _ = std::fs::remove_dir_all(&tmp);
+        if !dir.join(".complete").exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return perf_folder(n);
+        }
+    }
+    dir
+}

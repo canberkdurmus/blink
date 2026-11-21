@@ -50,9 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      - name: Install exiftool (oracle)
+      - name: Install exiftool (oracle) and lavapipe (wgpu software rendering for UI goldens)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends libimage-exiftool-perl
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends libimage-exiftool-perl mesa-vulkan-drivers
       - name: Corpus cache
         uses: actions/cache@v6
         with:
@@ -79,6 +79,12 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: perf
+      - name: Corpus cache
+        uses: actions/cache@v6
+        with:
+          path: corpus/cache
+          key: corpus-${{ hashFiles('corpus/manifest.toml') }}
+      - run: cargo xtask corpus fetch
       - run: cargo xtask bench
       - uses: actions/upload-artifact@v7
         if: always()

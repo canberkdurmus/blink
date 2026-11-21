@@ -93,12 +93,20 @@ impl State {
     /// The effect that shows the current item and prefetches its neighbours.
     fn show_effect(&self) -> Option<Effect> {
         let cur = self.current?;
+        let window = prefetch_window(cur, self.items.len(), self.direction);
+        let forward = self.direction == Direction::Forward;
+        let ahead = window
+            .iter()
+            .filter(|&&i| (i > cur) == forward)
+            .map(|&i| ItemRef::of(&self.items[i]))
+            .collect();
         Some(Effect::Show {
             current: ItemRef::of(self.items.get(cur)?),
-            prefetch: prefetch_window(cur, self.items.len(), self.direction)
+            prefetch: window
                 .into_iter()
                 .map(|i| ItemRef::of(&self.items[i]))
                 .collect(),
+            ahead,
         })
     }
 
@@ -149,6 +157,8 @@ pub enum Action {
         zoom: Zoom,
         cursor: Option<[f32; 2]>,
     },
+    /// Decode the current item's RAW data now, whatever the preview size (bench scripts, PERF-5).
+    DecodeRaw,
     /// `Z` / click: Fit ↔ 100 % at the cursor (VIEW-4).
     ToggleZoom100 {
         cursor: Option<[f32; 2]>,
@@ -192,10 +202,12 @@ pub enum Effect {
         change: MarkChange,
     },
     /// Display `current` as soon as possible and prefetch `prefetch` in order. Jobs for any
-    /// other item are stale and may be cancelled.
+    /// other item are stale and may be cancelled. `ahead` lists the prefetched items in the
+    /// travel direction, nearest first, so the loader can decode ahead of a held key (PERF-3).
     Show {
         current: ItemRef,
         prefetch: Vec<ItemRef>,
+        ahead: Vec<ItemRef>,
     },
     /// Load the full-resolution image of `item`: its paired JPEG if any, else a RAW decode.
     LoadFull {
@@ -292,6 +304,19 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             };
             s.loupe.set_zoom(zoom, cursor);
             fx.extend(s.full_effect());
+        }
+        Action::DecodeRaw => {
+            if let Some(it) = s.current_item()
+                && it.primary.kind.is_raw_like()
+                && !s.loupe.pending_full
+            {
+                let item = ItemRef {
+                    paired_jpeg: None,
+                    ..ItemRef::of(it)
+                };
+                s.loupe.pending_full = true;
+                fx.push(Effect::LoadFull { item });
+            }
         }
         Action::Pan(d) => s.loupe.pan(d),
         Action::Resize(v) => {
@@ -570,7 +595,10 @@ mod tests {
                 files: scanned("/f", &["a.ARW", "b.ARW", "c.ARW"]),
             },
         );
-        let Some(Effect::Show { current, prefetch }) = fx.first() else {
+        let Some(Effect::Show {
+            current, prefetch, ..
+        }) = fx.first()
+        else {
             panic!("{fx:?}")
         };
         assert_eq!(current.path, Path::new("/f/a.ARW"));
@@ -753,6 +781,37 @@ mod tests {
     }
 
     #[test]
+    fn req_perf_3_show_lists_the_items_ahead_in_the_travel_direction_nearest_first() {
+        let names: Vec<String> = (0..20).map(|i| format!("{i:02}.ARW")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let s = opened(&names);
+        let ahead = |fx: &[Effect]| match fx.first() {
+            Some(Effect::Show {
+                ahead, prefetch, ..
+            }) => {
+                assert!(ahead.iter().all(|a| prefetch.contains(a)));
+                ahead
+                    .iter()
+                    .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        };
+        let (s, fx) = reduce(&s, Action::Navigate(Nav::Next));
+        let (s, fx) = (s, ahead(&fx));
+        assert_eq!(
+            fx,
+            [
+                "02.ARW", "03.ARW", "04.ARW", "05.ARW", "06.ARW", "07.ARW", "08.ARW", "09.ARW"
+            ]
+        );
+        let (s, fx) = reduce(&s, Action::Navigate(Nav::Last));
+        assert!(ahead(&fx).is_empty(), "nothing ahead of the last item");
+        let (_, fx) = reduce(&s, Action::Navigate(Nav::Prev));
+        assert_eq!(ahead(&fx)[..3], ["17.ARW", "16.ARW", "15.ARW"]);
+    }
+
+    #[test]
     fn req_view_9_zoom_position_is_kept_on_the_next_item_and_toggleable() {
         let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
         let (s, _) = reduce(&s, Action::Resize([1000.0, 500.0]));
@@ -799,5 +858,44 @@ mod tests {
         assert!(s.loupe.clipping && s.loupe.info_panel);
         let (s, _) = reduce(&s, Action::ToggleClipping);
         assert!(!s.loupe.clipping);
+    }
+
+    #[test]
+    fn req_perf_5_decode_raw_requests_a_raw_decode_even_with_a_full_size_preview_or_jpeg() {
+        let s = opened(&["a.ARW", "a.JPG", "b.JPG"]);
+        let (s, _) = reduce(
+            &s,
+            ready(
+                "/f/a.ARW",
+                Level::Preview,
+                PreviewSource::Embedded,
+                (4912, 3264),
+            ),
+        );
+        let (s, fx) = reduce(&s, Action::DecodeRaw);
+        assert_eq!(
+            fx,
+            [Effect::LoadFull {
+                item: ItemRef {
+                    path: "/f/a.ARW".into(),
+                    kind: FileKind::Raw,
+                    paired_jpeg: None
+                }
+            }]
+        );
+        assert!(s.loupe.pending_full);
+        let (s, _) = reduce(
+            &s,
+            ready(
+                "/f/a.ARW",
+                Level::Full,
+                PreviewSource::RawDecode,
+                (4912, 3264),
+            ),
+        );
+        assert_eq!(s.loupe.shown.unwrap().source, PreviewSource::RawDecode);
+        // A standalone JPEG has no RAW data.
+        let s = opened(&["b.JPG"]);
+        assert!(reduce(&s, Action::DecodeRaw).1.is_empty());
     }
 }

@@ -157,7 +157,20 @@ fn finish(
 
 /// Decode a whole JPEG file for display (standalone or paired JPEG).
 pub fn decode_jpeg_file(bytes: &[u8], source: PreviewSource) -> Result<Preview, DecodeError> {
-    let d = image::decode_jpeg(bytes)?;
+    decode_jpeg_file_threads(bytes, source, all_threads())
+}
+
+fn all_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// [`decode_jpeg_file`] on at most `threads` threads.
+pub fn decode_jpeg_file_threads(
+    bytes: &[u8],
+    source: PreviewSource,
+    threads: usize,
+) -> Result<Preview, DecodeError> {
+    let d = image::decode_jpeg_threads(bytes, threads)?;
     let own = d
         .exif
         .as_deref()
@@ -170,6 +183,15 @@ pub fn decode_jpeg_file(bytes: &[u8], source: PreviewSource) -> Result<Preview, 
 /// Decode the chosen embedded preview of a RAW/DNG for display. Orientation comes from the
 /// container's EXIF (embedded previews are stored unrotated).
 pub fn decode_embedded(file: &[u8], a: &Analysis) -> Result<Preview, DecodeError> {
+    decode_embedded_threads(file, a, all_threads())
+}
+
+/// [`decode_embedded`] on at most `threads` threads.
+pub fn decode_embedded_threads(
+    file: &[u8],
+    a: &Analysis,
+    threads: usize,
+) -> Result<Preview, DecodeError> {
     let c = a
         .chosen
         .ok_or_else(|| DecodeError("no embedded preview".into()))?;
@@ -180,7 +202,7 @@ pub fn decode_embedded(file: &[u8], a: &Analysis) -> Result<Preview, DecodeError
     let orientation = a.exif.orientation.unwrap_or(1);
     match c.kind {
         EmbeddedKind::Jpeg => {
-            let d = image::decode_jpeg(bytes)?;
+            let d = image::decode_jpeg_threads(bytes, threads)?;
             let own = d.exif.as_deref().map(exif::from_tiff_bytes);
             let space = space_of(d.icc, own.as_ref(), &a.exif);
             finish(d.image, space, orientation, source)
