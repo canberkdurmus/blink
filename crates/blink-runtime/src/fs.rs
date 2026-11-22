@@ -262,7 +262,7 @@ impl Fs for RealFs {
 /// Windows: a volume without a Recycle Bin (most removable drives) may delete for good, so its
 /// root must hold `$Recycle.Bin`. macOS: NSFileManager fails rather than deletes.
 fn trash_moves_without_copying(path: &Path) -> io::Result<()> {
-    let refuse = |why: &str| {
+    let refuse = |why: &str| -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
