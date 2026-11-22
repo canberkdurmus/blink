@@ -233,6 +233,8 @@ struct Shared<T> {
     queue_cv: Condvar,
     full: Mutex<FullSlot>,
     full_cv: Condvar,
+    /// A full-resolution load is running.
+    full_running: std::sync::atomic::AtomicBool,
     cache: Mutex<Cache<T>>,
     generation: AtomicU64,
     pace: Mutex<Pace>,
@@ -292,6 +294,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
             queue_cv: Condvar::new(),
             full: Mutex::new(FullSlot::default()),
             full_cv: Condvar::new(),
+            full_running: std::sync::atomic::AtomicBool::new(false),
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
                 tick: 0,
@@ -423,6 +426,19 @@ impl<T: Send + Sync + 'static> Loader<T> {
     pub fn best(&self, path: &Path) -> Option<Arc<Loaded<T>>> {
         self.get(path, Level::Full)
             .or_else(|| self.get(path, Level::Preview))
+    }
+
+    /// A probe, usable from any thread, that is true while the loader has work: preview jobs
+    /// queued or running, or a full-resolution load waiting or running. Background scans
+    /// (capture metadata) wait while it is true, so they never slow what the user is looking at.
+    pub fn busy_probe(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let s = self.shared.clone();
+        move || {
+            let q = lock(&s.queue);
+            let previews = !q.jobs.is_empty() || !q.running.is_empty();
+            drop(q);
+            previews || s.full_running.load(Ordering::SeqCst) || lock(&s.full).next.is_some()
+        }
     }
 
     /// No preview job queued or running.
@@ -666,6 +682,7 @@ fn full_worker<T>(s: &Shared<T>) {
                     return;
                 }
                 if let Some(n) = slot.next.take() {
+                    s.full_running.store(true, Ordering::SeqCst);
                     break n;
                 }
                 slot = s.full_cv.wait(slot).unwrap_or_else(|e| e.into_inner());
@@ -673,6 +690,7 @@ fn full_worker<T>(s: &Shared<T>) {
         };
         let (item, epoch) = item;
         let result = load_full(s, &item);
+        s.full_running.store(false, Ordering::SeqCst);
         let pinned = pinned(s);
         let mut c = lock(&s.cache);
         if epoch != s.epoch.load(Ordering::SeqCst) {

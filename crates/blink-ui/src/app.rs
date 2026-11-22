@@ -435,9 +435,10 @@ impl BlinkApp {
         const CHUNK: usize = 256;
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
         let items = self.state.items.clone();
+        let busy = self.loader.busy_probe();
         std::thread::spawn(move || {
             for chunk in items.chunks(CHUNK) {
-                let m = blink_runtime::meta::load_meta(fs.as_ref(), chunk);
+                let m = blink_runtime::meta::load_meta_yielding(fs.as_ref(), chunk, &busy);
                 if tx.send(Action::MetaLoaded(m)).is_err() {
                     return;
                 }

@@ -41,9 +41,22 @@ pub fn file_meta(fs: &dyn Fs, path: &Path, kind: FileKind) -> Option<ItemMeta> {
 /// Capture metadata of each item's primary file, in `items` order. Items whose metadata can't
 /// be read are left out (metadata filters then exclude them).
 pub fn load_meta(fs: &dyn Fs, items: &[Item]) -> Vec<(PathBuf, ItemMeta)> {
+    load_meta_yielding(fs, items, &|| false)
+}
+
+/// [`load_meta`], waiting before each file while `busy()` (the image loader has work), so the
+/// scan only uses I/O and CPU the loupe doesn't need (PERF-1, PERF-5).
+pub fn load_meta_yielding(
+    fs: &dyn Fs,
+    items: &[Item],
+    busy: &dyn Fn() -> bool,
+) -> Vec<(PathBuf, ItemMeta)> {
     items
         .iter()
         .filter_map(|i| {
+            while busy() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             file_meta(fs, &i.primary.path, i.primary.kind).map(|m| (i.primary.path.clone(), m))
         })
         .collect()
@@ -127,5 +140,24 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, FsCall::ReadPrefix(p, _) if p.ends_with("x.HEIC")))
         );
+    }
+
+    #[test]
+    fn req_filt_1_the_metadata_scan_waits_while_the_loader_is_busy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fs = MemFs::new();
+        fs.add_file("/f/a.DNG", tiff_with_model("CAMERA A", 64));
+        let polls = AtomicUsize::new(0);
+        // Busy for the first three polls: no file is read until it isn't.
+        let busy = || {
+            let n = polls.fetch_add(1, Ordering::SeqCst);
+            if n < 3 {
+                assert!(fs.calls().is_empty(), "read while the loader was busy");
+            }
+            n < 3
+        };
+        let got = load_meta_yielding(&fs, &[item("/f/a.DNG", FileKind::Dng)], &busy);
+        assert_eq!(got.len(), 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
     }
 }
