@@ -3,8 +3,10 @@
 //! clipping overlay and histogram (VIEW-6) and the info panel (VIEW-7).
 
 use crate::tiles::{self, Prepared, Tile};
-use blink_core::formats::Formats;
+use blink_core::filter::{Cond, Filter};
+use blink_core::formats::{FileKind, Formats};
 use blink_core::preview::PreviewSource;
+use blink_core::sort::SortKey;
 use blink_core::state::{
     Action, Effect, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
 };
@@ -149,6 +151,13 @@ pub struct BlinkApp {
     drag_moved: bool,
     /// Loupe area of the last frame (points).
     loupe_rect: Option<Rect>,
+    /// Text of the filter menu's expression field (FILT-1).
+    filter_text: String,
+    /// Why the expression didn't parse.
+    filter_error: Option<String>,
+    /// A scan finished; read capture metadata once the first image is on screen, so it never
+    /// competes with it (PERF-1).
+    meta_wanted: bool,
 }
 
 impl BlinkApp {
@@ -243,6 +252,9 @@ impl BlinkApp {
             toast_at: 0.0,
             drag_moved: false,
             loupe_rect: None,
+            filter_text: String::new(),
+            filter_error: None,
+            meta_wanted: false,
         };
         if let Some(f) = folder {
             app.open_path(&f);
@@ -346,6 +358,13 @@ impl BlinkApp {
             }
             if scanned {
                 self.load_marks();
+                self.meta_wanted = true;
+            }
+            if self.meta_wanted
+                && (self.state.loupe.shown.is_some() || self.state.current.is_none())
+            {
+                self.meta_wanted = false;
+                self.load_meta();
             }
             for e in fx {
                 match &e {
@@ -410,6 +429,24 @@ impl BlinkApp {
         });
     }
 
+    /// Capture metadata for filters and the capture-time sort (FILT-1/2), in chunks so the
+    /// first items sort before the whole folder is read.
+    fn load_meta(&self) {
+        const CHUNK: usize = 256;
+        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+        let items = self.state.items.clone();
+        let busy = self.loader.busy_probe();
+        std::thread::spawn(move || {
+            for chunk in items.chunks(CHUNK) {
+                let m = blink_runtime::meta::load_meta_yielding(fs.as_ref(), chunk, &busy);
+                if tx.send(Action::MetaLoaded(m)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+    }
+
     /// Feed results from background threads.
     pub fn pump(&mut self) {
         let mut incoming: Vec<Action> = self.rx.try_iter().collect();
@@ -451,6 +488,10 @@ impl BlinkApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Typing into a text field (the filter expression) is not a shortcut.
+        if ctx.text_edit_focused() {
+            return;
+        }
         let events = ctx.input(|i| i.events.clone());
         let mut actions = Vec::new();
         let mut open = false;
@@ -484,6 +525,10 @@ impl BlinkApp {
                     let c = digit_value(digit).unwrap_or(6) as usize - 6;
                     mark(MarkKey::Label(LabelColor::ALL[c]))
                 }
+                // Filter by rating ≥ n (FILT-1, SPEC §5.2).
+                _ if m.alt && !m.command && digit_value(digit).is_some_and(|d| d <= 5) => Some(
+                    Action::AddFilter(Cond::RatingAtLeast(digit_value(digit).unwrap_or(0) as i8)),
+                ),
                 Key::P if plain => mark(MarkKey::Pick),
                 Key::X if plain => mark(MarkKey::Reject),
                 Key::U if plain => mark(MarkKey::Unflag),
@@ -560,7 +605,12 @@ impl BlinkApp {
                     .unwrap_or_else(|| "No folder open".into());
                 ui.label(folder);
                 ui.separator();
-                ui.label(counter(self.state.current, self.state.items.len()));
+                ui.label(counter(self.state.pos(), self.state.visible.len()));
+                if self.state.visible.len() != self.state.items.len() {
+                    ui.weak(format!("of {}", thousands(self.state.items.len())));
+                }
+                ui.separator();
+                self.filter_bar(ui, &mut actions);
                 ui.separator();
                 for z in Zoom::LEVELS {
                     if ui
@@ -600,6 +650,102 @@ impl BlinkApp {
         }
         if open {
             self.open_dialog();
+        }
+    }
+
+    /// Filter chips, the add-filter menu and the sort selector (FILT-1, FILT-2).
+    fn filter_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        for (i, c) in self.state.filter.0.iter().enumerate() {
+            if ui
+                .button(format!("{} ×", c.label()))
+                .on_hover_text("Remove this filter")
+                .clicked()
+            {
+                actions.push(Action::RemoveFilter(i));
+            }
+        }
+        ui.menu_button("+ Filter", |ui| {
+            let mut add = |ui: &mut egui::Ui, text: String, c: Cond| {
+                if ui.button(text).clicked() {
+                    actions.push(Action::AddFilter(c));
+                    ui.close();
+                }
+            };
+            ui.menu_button("Rating ≥", |ui| {
+                for n in 0..=5 {
+                    add(ui, format!("≥ {n}  (Alt+{n})"), Cond::RatingAtLeast(n));
+                }
+            });
+            ui.menu_button("Rating =", |ui| {
+                for n in 0..=5 {
+                    add(ui, format!("= {n}"), Cond::RatingEq(n));
+                }
+            });
+            add(ui, "Picked".into(), Cond::Picked);
+            add(ui, "Rejected".into(), Cond::Rejected);
+            add(ui, "Not rejected".into(), Cond::NotRejected);
+            ui.menu_button("Label", |ui| {
+                for c in LabelColor::ALL {
+                    let name = self.state.prefs.label_name(c).to_string();
+                    add(ui, name.clone(), Cond::Label(name));
+                }
+            });
+            let distinct = |f: fn(&blink_core::filter::ItemMeta) -> Option<&String>| {
+                let mut v: Vec<String> = self.state.meta.values().filter_map(f).cloned().collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            for (title, values, make) in [
+                (
+                    "Body",
+                    distinct(|m| m.body.as_ref()),
+                    Cond::Body as fn(String) -> Cond,
+                ),
+                ("Lens", distinct(|m| m.lens.as_ref()), Cond::Lens),
+            ] {
+                ui.menu_button(title, |ui| {
+                    if values.is_empty() {
+                        ui.weak("—");
+                    }
+                    for v in values {
+                        add(ui, v.clone(), make(v));
+                    }
+                });
+            }
+            ui.menu_button("File type", |ui| {
+                for k in [FileKind::Raw, FileKind::Dng, FileKind::Jpeg, FileKind::Heif] {
+                    add(ui, k.label().into(), Cond::Kind(k));
+                }
+            });
+            ui.separator();
+            ui.label("Expression (focal=24..70, iso=..800, date=2024-06-01..):");
+            let r = ui.text_edit_singleline(&mut self.filter_text);
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                match Filter::parse(&self.filter_text) {
+                    Ok(f) => {
+                        actions.extend(f.0.into_iter().map(Action::AddFilter));
+                        self.filter_text.clear();
+                        self.filter_error = None;
+                        ui.close();
+                    }
+                    Err(e) => self.filter_error = Some(e),
+                }
+            }
+            if let Some(e) = &self.filter_error {
+                ui.colored_label(Color32::from_rgb(230, 90, 80), e);
+            }
+        });
+        let mut sort = self.state.sort;
+        egui::ComboBox::from_label("Sort")
+            .selected_text(sort.label())
+            .show_ui(ui, |ui| {
+                for k in SortKey::ALL {
+                    ui.selectable_value(&mut sort, k, k.label());
+                }
+            });
+        if sort != self.state.sort {
+            actions.push(Action::SetSort(sort));
         }
     }
 

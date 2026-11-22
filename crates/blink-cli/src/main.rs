@@ -24,7 +24,9 @@ const USAGE: &str = "usage:
 
 --style: name of new sidecars (default adobe: IMG.xmp; darktable: IMG.ARW.xmp).
 -r: include sub-folders. Filter EXPR: comma-separated, AND-combined:
-  rating>=N, rating=N, rejected, !rejected, picked, label=NAME, kind=raw|dng|jpeg|heif";
+  rating>=N, rating=N, rejected, !rejected, picked, label=NAME, body=NAME, lens=NAME,
+  focal=MIN..MAX, iso=MIN..MAX, date=YYYY-MM-DD..YYYY-MM-DD, kind=raw|dng|jpeg|heif
+  (either end of a range may be left out; one value is a one-value range)";
 
 /// Default pick value (D-2): pick = 1 star.
 const PICK_VALUE: i8 = 1;
@@ -165,10 +167,21 @@ fn rel(folder: &Path, p: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn filtered<'a>(s: &'a State, f: &Filter) -> Vec<&'a Item> {
+/// Items passing `f`, in path order. Capture metadata is read only when the filter needs it.
+fn filtered<'a>(fs: &dyn Fs, s: &'a State, f: &Filter) -> Vec<&'a Item> {
+    let meta: std::collections::BTreeMap<_, _> = if f.needs_meta() {
+        blink_runtime::meta::load_meta(fs, &s.items)
+            .into_iter()
+            .collect()
+    } else {
+        Default::default()
+    };
     s.items
         .iter()
-        .filter(|i| f.matches(i, s.marks.get(&i.primary.path), PICK_VALUE))
+        .filter(|i| {
+            let p = &i.primary.path;
+            f.matches_meta(i, s.marks.get(p), meta.get(p), PICK_VALUE)
+        })
         .collect()
 }
 
@@ -222,7 +235,7 @@ fn cmd_list(
 ) -> Result<(), String> {
     let folder = one_positional(o, "folder")?;
     let s = open(fs, backend, &folder, o.recursive)?;
-    for i in filtered(&s, &o.filter) {
+    for i in filtered(fs, &s, &o.filter) {
         let m = s.marks.get(&i.primary.path);
         let comp: Vec<String> = i
             .companions
@@ -275,7 +288,7 @@ fn cmd_export(
     if csv {
         let _ = writeln!(out, "path,rating,label,pick");
     }
-    for i in filtered(&s, &o.filter) {
+    for i in filtered(fs, &s, &o.filter) {
         let m = s.marks.get(&i.primary.path);
         for member in i.members() {
             let p = member.path.to_string_lossy();

@@ -183,4 +183,22 @@ mod full_corpus {
         assert_eq!(out.lines().count(), manifest().files.len());
         check(&snapshot("list.txt"), &out);
     }
+
+    /// FILT-1 through the CLI: metadata conditions read each file's EXIF.
+    #[test]
+    fn req_filt_1_cli_list_filters_by_capture_metadata_on_the_corpus() {
+        let root = cache_dir();
+        let list = |expr: &str| -> Vec<String> {
+            let (ok, out) = cli(&["list", "-r", "--filter", expr, root.to_str().unwrap()]);
+            assert!(ok, "{expr}");
+            out.lines()
+                .map(|l| l.split('\t').next().unwrap_or("").to_string())
+                .collect()
+        };
+        assert_eq!(list("body=SONY NEX-5N").len(), 1);
+        assert!(list("body=SONY NEX-5N")[0].contains("NEX-5N.ARW"));
+        assert_eq!(list("iso=..100").len(), 7);
+        assert_eq!(list("date=2017-01-01..2017-12-31,iso=200").len(), 1);
+        assert_eq!(list("lens=nope").len(), 0);
+    }
 }

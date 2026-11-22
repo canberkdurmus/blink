@@ -189,7 +189,8 @@ pub fn read(file: &[u8]) -> ExifInfo {
             .get(88..92)
             .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
         if let (Some(off), Some(len)) = (off, len)
-            && let Some(jpeg) = file.get(off..off.saturating_add(len))
+            // A file prefix (metadata scan) may end inside the JPEG; its EXIF comes first.
+            && let Some(jpeg) = file.get(off..off.saturating_add(len).min(file.len()))
             && let Some(p) = jpeg_exif_payload(jpeg)
         {
             info = from_tiff_bytes(p);
