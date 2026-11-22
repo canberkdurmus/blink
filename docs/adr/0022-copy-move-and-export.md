@@ -37,3 +37,11 @@ FILE-2: copy or move the current filter's items to a chosen folder, and export t
 ## Consequences
 
 - The CLI's export output is unchanged (CLI-1 goldens pass).
+
+## Copies run beside culling
+
+A copy moves nothing, so it doesn't hold the file-operation lock (`file_op_running`): it runs on
+its own thread through `Fs`, counted in `copies_running`. Marks and rating undo keep working and
+their debounced sidecar writes don't queue behind the copy. Operations that move files (apply
+rejects, move, undo/redo of a file edit) wait until copies finish, so no file is pulled from under
+a copy. A sidecar rewritten during a copy is copied as its old or its new version (atomic rename).

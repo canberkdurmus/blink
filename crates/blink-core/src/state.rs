@@ -225,6 +225,9 @@ pub struct State {
     pub confirm: Option<Confirm>,
     /// A file operation is running: undo, redo and apply rejects wait for its result.
     pub file_op_running: bool,
+    /// Copies running (FILE-2). They move nothing, so marks keep working; only operations
+    /// that move files wait for them.
+    pub copies_running: usize,
     /// The running operation's folder and, for undo/redo, the moves it asked for: moves that
     /// didn't happen stay in the history, and a result for another folder isn't recorded.
     pub file_op: Option<(PathBuf, Vec<(PathBuf, PathBuf)>)>,
@@ -303,6 +306,7 @@ impl State {
             mark_gen: BTreeMap::new(),
             confirm: None,
             file_op_running: false,
+            copies_running: 0,
             file_op: None,
             filter: Filter::default(),
             sort: SortKey::default(),
@@ -1251,12 +1255,24 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
         Action::Undo | Action::Redo if s.file_op_running => {
             s.toast = Some("A file operation is still running".into());
         }
+        Action::Undo | Action::Redo
+            if s.copies_running > 0
+                && (matches!(action, Action::Undo)
+                    && matches!(s.undo.last(), Some(Edit::Files(_)))
+                    || matches!(action, Action::Redo)
+                        && matches!(s.redo.last(), Some(Edit::Files(_)))) =>
+        {
+            // Moving files back or again would pull them from under the copy.
+            s.toast = Some("A copy is still running".into());
+        }
         Action::Undo => s.step_history(false, &mut fx),
         Action::Redo => s.step_history(true, &mut fx),
         Action::ApplyRejects => {
             let count = s.rejected_items().len();
             if s.file_op_running {
                 s.toast = Some("A file operation is still running".into());
+            } else if s.copies_running > 0 {
+                s.toast = Some("A copy is still running".into());
             } else if count == 0 {
                 s.toast = Some("No rejected items".into());
             } else {
@@ -1287,12 +1303,18 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
         Action::Transfer { dest, copy } => {
             if s.file_op_running {
                 s.toast = Some("A file operation is still running".into());
+            } else if !copy && s.copies_running > 0 {
+                s.toast = Some("A copy is still running".into());
             } else if s.visible.is_empty() {
                 s.toast = Some("No items to copy or move".into());
             } else {
                 let items = s.visible.iter().map(|&i| s.members_of(i)).collect();
-                s.file_op_running = true;
-                s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
+                if copy {
+                    s.copies_running += 1;
+                } else {
+                    s.file_op_running = true;
+                    s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
+                }
                 fx.push(Effect::FileOp {
                     op: FileOp::Transfer { items, dest, copy },
                     kind: FileOpKind::Transfer { copy },
@@ -1309,6 +1331,34 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             s.toast = Some(match error {
                 None => format!("Saved the item list to {name}"),
                 Some(e) => format!("Could not save {name}: {e}"),
+            });
+        }
+        Action::FilesMoved {
+            kind: FileOpKind::Transfer { copy: true },
+            moves,
+            trashed,
+            errors,
+        } => {
+            s.copies_running = s.copies_running.saturating_sub(1);
+            let _ = trashed;
+            let copied: std::collections::BTreeSet<&PathBuf> =
+                moves.iter().map(|(f, _)| f).collect();
+            let n = s
+                .items
+                .iter()
+                .filter(|i| copied.contains(&i.primary.path))
+                .count();
+            s.toast = Some(if errors.is_empty() {
+                format!("Copied {n} items")
+            } else {
+                s.log.push(format!(
+                    "Some files could not be copied: {}",
+                    errors.join("; ")
+                ));
+                format!(
+                    "Copied {n} items; {} files could not be copied",
+                    errors.len()
+                )
             });
         }
         Action::FilesMoved {
@@ -1363,14 +1413,8 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                         format!("Moved {n_items} rejected items to _rejected/")
                     });
                 }
-                FileOpKind::Transfer { copy: true } => {
-                    let n = s
-                        .items
-                        .iter()
-                        .filter(|i| moves.iter().any(|(f, _)| *f == i.primary.path))
-                        .count();
-                    s.toast = Some(format!("Copied {n} items"));
-                }
+                // Handled above: a copy never runs as the file operation.
+                FileOpKind::Transfer { copy: true } => {}
                 FileOpKind::Transfer { copy: false } => {
                     if !moves.is_empty() {
                         s.undo.push(Edit::Files(edit));
@@ -2704,6 +2748,33 @@ mod tests {
                 kind: FileOpKind::Transfer { copy: true },
             }]
         );
+        // While it runs, marking and rating undo keep working; moves wait for it.
+        assert_eq!(c.copies_running, 1);
+        assert!(!c.file_op_running);
+        let (r, fx) = reduce(&c, Action::SetRating { item: 0, rating: 5 });
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::WriteSidecar { .. })),
+            "a mark during a copy writes its sidecar"
+        );
+        let (r, fx) = reduce(&r, Action::Undo);
+        assert!(fx.iter().any(|e| matches!(e, Effect::WriteSidecar { .. })));
+        let (r, fx) = reduce(
+            &r,
+            Action::Transfer {
+                dest: "/out2".into(),
+                copy: false,
+            },
+        );
+        assert!(fx.is_empty());
+        assert_eq!(r.toast.as_deref(), Some("A copy is still running"));
+        let (r, fx) = reduce(
+            &r,
+            Action::Transfer {
+                dest: "/out2".into(),
+                copy: true,
+            },
+        );
+        assert_eq!((fx.len(), r.copies_running), (1, 2));
         let (c, _) = reduce(
             &c,
             Action::FilesMoved {
@@ -2716,6 +2787,7 @@ mod tests {
         assert_eq!(c.items.len(), 3);
         assert!(c.undo.is_empty());
         assert_eq!(c.toast.as_deref(), Some("Copied 1 items"));
+        assert_eq!(c.copies_running, 0);
         // Move: the items leave the folder and the move is undoable.
         let (m, _) = reduce(
             &s,

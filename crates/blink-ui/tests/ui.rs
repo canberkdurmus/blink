@@ -609,7 +609,7 @@ fn req_file_2_copy_move_and_export_of_the_filtered_items_through_the_app() {
         dest: "/out".into(),
         copy: true,
     });
-    step_until(&mut h, "copied", |a| !a.state().file_op_running);
+    step_until(&mut h, "copied", |a| a.state().copies_running == 0);
     assert_eq!(fs.peek("/out/IMG_0001.ARW"), fs.peek("/f/IMG_0001.ARW"));
     assert_eq!(fs.peek("/out/IMG_0001.xmp"), fs.peek("/f/IMG_0001.xmp"));
     assert!(fs.peek("/out/IMG_0000.ARW").is_none(), "filtered out");

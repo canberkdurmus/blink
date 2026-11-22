@@ -8,7 +8,7 @@ use blink_core::formats::{FileKind, Formats};
 use blink_core::preview::PreviewSource;
 use blink_core::sort::SortKey;
 use blink_core::state::{
-    Action, Confirm, Effect, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
+    Action, Confirm, Effect, FileOpKind, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
 };
 use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
@@ -397,6 +397,25 @@ impl BlinkApp {
                     } => self
                         .sidecars
                         .queue(source.clone(), change.clone(), *owns_adobe_name),
+                    Effect::FileOp {
+                        op,
+                        kind: kind @ FileOpKind::Transfer { copy: true },
+                    } => {
+                        // A copy moves nothing: off the sidecar thread, so marks and their
+                        // debounced writes never wait behind gigabytes of copying (FILE-2).
+                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+                        let (op, kind) = (op.clone(), *kind);
+                        std::thread::spawn(move || {
+                            let out = blink_runtime::files::run(fs.as_ref(), &op);
+                            let _ = tx.send(Action::FilesMoved {
+                                kind,
+                                moves: out.moves,
+                                trashed: out.trashed,
+                                errors: out.errors,
+                            });
+                            ctx.request_repaint();
+                        });
+                    }
                     Effect::FileOp { op, kind } => {
                         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
                         let kind = *kind;
