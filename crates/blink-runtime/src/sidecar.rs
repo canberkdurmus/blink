@@ -709,15 +709,10 @@ fn watch(
             if !paths.is_empty() {
                 let _ = tx.send(Msg::Changed(paths));
             }
-            // Content edits don't change the listing; hidden names (temp files, Blink's
-            // included) are never listed.
-            let listing = !matches!(
-                ev.kind,
-                notify::EventKind::Modify(
-                    notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Metadata(_)
-                )
-            );
-            if listing && others.iter().any(|p| !hidden(p)) {
+            // Content writes count too: a file listed while still being copied in has its
+            // capture metadata read again. Hidden names (temp files, Blink's included) are
+            // never listed.
+            if others.iter().any(|p| !hidden(p)) {
                 let _ = tx.send(Msg::FolderChanged);
             }
         }

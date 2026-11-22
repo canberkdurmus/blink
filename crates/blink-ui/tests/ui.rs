@@ -772,6 +772,25 @@ fn req_open_3_added_removed_and_renamed_files_show_within_1_s() {
         item_names(a) == ["IMG_0000.ARW", "IMG_0009.ARW", "renamed.ARW"]
     });
     settle(&mut h);
+    // A long copy reports events closer together than the debounce: the first file still
+    // shows within 1 s, not only when the events stop.
+    fs.add_file("/f/IMG_0010.ARW", raw(10));
+    let t = Instant::now();
+    let mut n = 11;
+    while h.state().state().items.len() < 4 {
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "a steady stream of events starved the rescan"
+        );
+        fs.add_file(format!("/f/IMG_{n:04}.ARW"), raw(10));
+        n += 1;
+        h.state().folder_changed();
+        for _ in 0..5 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    settle(&mut h);
 }
 
 /// OPEN-3 with the real watcher and real files (full tier: it touches the disk).

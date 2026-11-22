@@ -10,16 +10,22 @@ watcher on the sidecar thread for the open folder.
 
 ## Decision
 
-1. The same watcher also reports changes to files that aren't sidecars. It ignores
-   hidden names (temp files, Blink's included) and content-only modifications. It sends a single
+1. The same watcher also reports changes to files that aren't sidecars, including content
+   writes, so a file listed while still being copied in is read again. It ignores hidden names
+   (temp files, Blink's included) and access events. It sends a single
    `SidecarEvent::FolderChanged`, with no paths. Renames on some backends arrive as
    remove + create, so the folder is rescanned rather than patched per event.
-2. The UI debounces bursts (a card copy) by 150 ms, then dispatches `Action::FolderChanged`,
+2. The UI gathers a burst (a card copy) for 150 ms from its first event, so a long copy
+   still updates the list every ~150 ms plus the scan time. It then dispatches `Action::FolderChanged`,
    which the reducer turns into the existing `ScanFolder` effect. The UI keeps the running
    watch for a rescan of the same folder and mode, so no events are lost while it restarts.
+   Reopening a folder always re-creates the watch. Scans of one folder and mode run one at a
+   time: a rescan asked for while one runs starts when it returns, so an older listing never
+   lands after a newer one.
 3. `FolderScanned` keeps the current item. If that item is gone, the next one still listed
    takes its place, and if there is none, the previous one, as for apply rejects. After any scan,
-   marks and capture metadata are read only for items not listed before.
+   marks are read only for items not listed before. Capture metadata is read for those, and
+   again for any listed item that has none yet.
 4. Undo/redo history, marks and filters are untouched: they are keyed by path, and a renamed
    file is a new item (its sidecar moves with it only if the renaming app moved it).
 

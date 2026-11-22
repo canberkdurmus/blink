@@ -175,6 +175,8 @@ pub struct BlinkApp {
     watching: Option<(PathBuf, bool)>,
     /// A folder change was reported; rescan at this time (debounced bursts, OPEN-3).
     rescan_at: Option<Instant>,
+    /// Scans running, by folder and mode; `true`: run it again when it returns.
+    scans: HashMap<(PathBuf, bool), bool>,
     /// Decode cache cap (PERF-8).
     cache_cap: usize,
     external_apps: Vec<ExternalApp>,
@@ -283,6 +285,7 @@ impl BlinkApp {
             meta_wanted: Vec::new(),
             watching: None,
             rescan_at: None,
+            scans: HashMap::new(),
             cache_cap,
         };
         if let Some(f) = folder {
@@ -378,6 +381,18 @@ impl BlinkApp {
         let mut queue = VecDeque::from([action]);
         while let Some(a) = queue.pop_front() {
             let scanned = matches!(a, Action::FolderScanned { .. });
+            // Scans of one folder and mode run one at a time, so an older listing can never
+            // land after a newer one; a scan asked for meanwhile runs when it returns.
+            let rescan = match &a {
+                Action::FolderScanned {
+                    folder, recursive, ..
+                } => self
+                    .scans
+                    .remove(&(folder.clone(), *recursive))
+                    .filter(|&pending| pending)
+                    .map(|_| (folder.clone(), *recursive)),
+                _ => None,
+            };
             let known: std::collections::HashSet<PathBuf> = if scanned {
                 self.state
                     .items
@@ -397,6 +412,9 @@ impl BlinkApp {
                 self.l1_order.clear();
                 self.drawn = None;
                 self.loader.clear();
+                // Opening again re-creates the watch (the folder may have been replaced, or
+                // the last watch failed).
+                self.watching = None;
             }
             let (s, fx) = reduce(&self.state, a);
             let toast_changed = s.toast != self.state.toast;
@@ -414,9 +432,29 @@ impl BlinkApp {
                     .cloned()
                     .collect();
                 if !fresh.is_empty() {
-                    self.load_marks(fresh.clone());
-                    self.meta_wanted.extend(fresh);
+                    self.load_marks(fresh);
                 }
+                // Capture metadata for new items, and again for any whose read gave nothing
+                // (a file still being copied in when it was first listed).
+                let pending: std::collections::HashSet<PathBuf> = self
+                    .meta_wanted
+                    .iter()
+                    .map(|i| i.primary.path.clone())
+                    .collect();
+                let missing: Vec<Item> = self
+                    .state
+                    .items
+                    .iter()
+                    .filter(|i| {
+                        !self.state.meta.contains_key(&i.primary.path)
+                            && !pending.contains(&i.primary.path)
+                    })
+                    .cloned()
+                    .collect();
+                self.meta_wanted.extend(missing);
+            }
+            if let Some((folder, recursive)) = rescan {
+                self.start_scan(folder, recursive);
             }
             if !self.meta_wanted.is_empty()
                 && (self.state.loupe.shown.is_some() || self.state.current.is_none())
@@ -433,7 +471,7 @@ impl BlinkApp {
                             self.sidecars.watch(folder.clone(), *recursive);
                             self.watching = target;
                         }
-                        self.scan(folder.clone(), *recursive)
+                        self.start_scan(folder.clone(), *recursive)
                     }
                     Effect::ReloadMarks {
                         item,
@@ -540,6 +578,19 @@ impl BlinkApp {
         });
     }
 
+    /// Scan unless the same scan is running; then run it again once that one returns.
+    fn start_scan(&mut self, folder: PathBuf, recursive: bool) {
+        match self.scans.entry((folder.clone(), recursive)) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.insert(true);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(false);
+                self.scan(folder, recursive);
+            }
+        }
+    }
+
     fn scan(&self, folder: PathBuf, recursive: bool) {
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
@@ -586,8 +637,10 @@ impl BlinkApp {
         incoming.extend(self.loader.poll());
         for a in incoming {
             if matches!(a, Action::FolderChanged) {
-                // A copy into the folder reports many events: one rescan once they settle.
-                self.rescan_at = Some(Instant::now() + RESCAN_DEBOUNCE);
+                // A copy into the folder reports many events: one rescan for a burst, timed
+                // from its first event so a long copy still shows within 1 s.
+                self.rescan_at
+                    .get_or_insert_with(|| Instant::now() + RESCAN_DEBOUNCE);
                 continue;
             }
             self.dispatch(a);
