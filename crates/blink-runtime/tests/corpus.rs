@@ -131,4 +131,165 @@ mod full_corpus {
             }
         }
     }
+
+    /// SPEC FILT-1 acceptance: filter results equal the expected sets on the corpus. Expected
+    /// sets come from the frozen EXIF values in `corpus/manifest.toml`, evaluated here directly.
+    #[test]
+    fn req_filt_1_req_filt_2_filter_results_and_capture_order_on_the_corpus() {
+        use blink_core::filter::{Filter, ItemMeta};
+        use blink_core::sort::SortKey;
+        use blink_core::state::{Action, State, reduce};
+        use std::collections::BTreeMap;
+
+        let formats = Formats::new(blink_decode::default_backend().extensions());
+        let root = cache_dir();
+        let m = manifest();
+        let mut s = State::new(formats.clone());
+        s = reduce(&s, Action::OpenFolder(root.clone())).0;
+        s = reduce(&s, Action::SetRecursive(true)).0;
+        let files = scan_folder(&RealFs, &root, true).unwrap();
+        s = reduce(
+            &s,
+            Action::FolderScanned {
+                folder: root.clone(),
+                recursive: true,
+                files,
+            },
+        )
+        .0;
+        let meta = blink_runtime::meta::load_meta(&RealFs, &s.items);
+        assert_eq!(meta.len(), m.files.len(), "every corpus file has metadata");
+        s = reduce(&s, Action::MetaLoaded(meta)).0;
+
+        // Expected metadata straight from the manifest.
+        let want: BTreeMap<PathBuf, ItemMeta> = m
+            .files
+            .iter()
+            .map(|e| {
+                let x = &e.expected.exif;
+                let st = |k: &str| x.get(k).and_then(|v| v.as_str()).map(String::from);
+                let num = |k: &str| {
+                    x.get(k)
+                        .and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64)))
+                };
+                (
+                    root.join(&e.path),
+                    ItemMeta {
+                        body: blink_core::info::body(st("make").as_deref(), st("model").as_deref()),
+                        lens: st("lens"),
+                        focal_mm: num("focal_length"),
+                        iso: num("iso").map(|v| v as u32),
+                        captured: st("date_time_original"),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(s.meta, want);
+
+        let rel = |s: &State| -> BTreeSet<String> {
+            s.visible_items()
+                .map(|i| {
+                    i.primary
+                        .path
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect()
+        };
+        let expect = |pred: &dyn Fn(&ItemMeta) -> bool| -> BTreeSet<String> {
+            m.files
+                .iter()
+                .filter(|e| pred(&want[&root.join(&e.path)]))
+                .map(|e| e.path.clone())
+                .collect()
+        };
+        let in_range = |v: Option<f64>, lo: f64, hi: f64| v.is_some_and(|v| v >= lo && v <= hi);
+        type Pred = Box<dyn Fn(&ItemMeta) -> bool>;
+        let cases: Vec<(&str, Pred)> = vec![
+            (
+                "body=SONY NEX-5N",
+                Box::new(|x| x.body.as_deref() == Some("SONY NEX-5N")),
+            ),
+            (
+                "body=canon eos r6",
+                Box::new(|x| x.body.as_deref() == Some("Canon EOS R6")),
+            ),
+            (
+                "lens=NIKKOR Z 24-70mm f/4 S",
+                Box::new(|x| x.lens.as_deref() == Some("NIKKOR Z 24-70mm f/4 S")),
+            ),
+            (
+                "focal=24..70",
+                Box::new(move |x| in_range(x.focal_mm, 24.0, 70.0)),
+            ),
+            (
+                "focal=..10",
+                Box::new(move |x| in_range(x.focal_mm, 0.0, 10.0)),
+            ),
+            ("iso=..100", Box::new(|x| x.iso.is_some_and(|i| i <= 100))),
+            (
+                "iso=160..800",
+                Box::new(|x| x.iso.is_some_and(|i| (160..=800).contains(&i))),
+            ),
+            (
+                "date=2017-01-01..2017-12-31",
+                Box::new(|x| {
+                    x.captured
+                        .as_deref()
+                        .is_some_and(|c| c.starts_with("2017:"))
+                }),
+            ),
+            (
+                "date=2020-11-28",
+                Box::new(|x| {
+                    x.captured
+                        .as_deref()
+                        .is_some_and(|c| c.starts_with("2020:11:28"))
+                }),
+            ),
+            ("kind=dng", Box::new(|_| false)),
+            (
+                "iso=100,focal=..60",
+                Box::new(move |x| x.iso == Some(100) && in_range(x.focal_mm, 0.0, 60.0)),
+            ),
+        ];
+        for (expr, pred) in &cases {
+            let got = rel(&reduce(&s, Action::SetFilter(Filter::parse(expr).unwrap())).0);
+            let mut want_set = expect(pred.as_ref());
+            if *expr == "kind=dng" {
+                want_set = m
+                    .files
+                    .iter()
+                    .filter(|e| e.path.to_ascii_lowercase().ends_with(".dng"))
+                    .map(|e| e.path.clone())
+                    .collect();
+            }
+            assert_eq!(got, want_set, "{expr}");
+        }
+        // Spot checks, so an empty expectation can't pass silently.
+        let count =
+            |e: &str| rel(&reduce(&s, Action::SetFilter(Filter::parse(e).unwrap())).0).len();
+        assert_eq!(count("body=SONY NEX-5N"), 1);
+        assert_eq!(count("kind=dng"), 2);
+        assert_eq!(count("date=2017-01-01..2017-12-31"), 3);
+        assert_eq!(count("iso=..100"), 7);
+
+        // FILT-2: the default capture-time order equals the manifest dates sorted.
+        assert_eq!(s.sort, SortKey::CaptureTime);
+        let got: Vec<PathBuf> = s.visible_items().map(|i| i.primary.path.clone()).collect();
+        let mut by_date: Vec<(&str, PathBuf)> = m
+            .files
+            .iter()
+            .map(|e| {
+                (
+                    e.expected.exif["date_time_original"].as_str().unwrap(),
+                    root.join(&e.path),
+                )
+            })
+            .collect();
+        by_date.sort();
+        assert_eq!(got, by_date.into_iter().map(|(_, p)| p).collect::<Vec<_>>());
+    }
 }

@@ -444,3 +444,66 @@ fn req_file_8_external_change_reloads_and_a_conflict_keeps_disk_and_shows_a_mark
             .contains(Path::new("/f/IMG_0001.ARW"))
     );
 }
+
+#[test]
+fn req_filt_1_req_filt_2_alt_digit_adds_a_removable_chip_and_the_sort_selector_reorders() {
+    use egui::{Key, Modifiers};
+    use egui_kittest::kittest::NodeT;
+    let fs = folder(4);
+    fs.add_file(
+        "/f/IMG_0001.xmp",
+        blink_testkit::sidecars::lightroom(3, None),
+    );
+    fs.add_file(
+        "/f/IMG_0003.xmp",
+        blink_testkit::sidecars::lightroom(5, None),
+    );
+    let mut h = harness(fs, true);
+    step_until(&mut h, "marks loaded", |a| a.state().marks.len() == 2);
+    settle(&mut h);
+    h.get_by_label("1 / 4");
+    // Alt+3: rating ≥ 3. The chip shows, the counter counts the visible items.
+    h.key_press_modifiers(Modifiers::ALT, Key::Num3);
+    h.step();
+    settle(&mut h);
+    h.get_by_label("Rating ≥ 3 ×");
+    h.get_by_label("1 / 2");
+    h.get_by_label("of 4");
+    assert_eq!(
+        h.state().displayed().unwrap().path,
+        Path::new("/f/IMG_0001.ARW")
+    );
+    h.key_press(Key::ArrowRight);
+    h.step();
+    settle(&mut h);
+    assert_eq!(
+        h.state().displayed().unwrap().path,
+        Path::new("/f/IMG_0003.ARW")
+    );
+    // Sort by rating: the 5-star item comes first.
+    let sort = |h: &Harness<'static, BlinkApp>| {
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Sort")
+            .accesskit_node()
+            .value()
+    };
+    assert_eq!(sort(&h).as_deref(), Some("Capture time"));
+    h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Sort")
+        .click();
+    h.run();
+    h.get_by_label("Rating").click();
+    h.run();
+    assert_eq!(sort(&h).as_deref(), Some("Rating"));
+    assert_eq!(h.state().state().sort, blink_core::sort::SortKey::Rating);
+    assert_eq!(h.state().state().pos(), Some(0));
+    assert_eq!(
+        h.state().state().current_item().unwrap().primary.path,
+        Path::new("/f/IMG_0003.ARW")
+    );
+    // The chip's × removes the filter.
+    h.get_by_label("Rating ≥ 3 ×").click();
+    h.run();
+    assert!(h.query_by_label("Rating ≥ 3 ×").is_none());
+    h.get_by_label("1 / 4");
+    assert!(h.query_by_label("of 4").is_none());
+    h.get_by_label("+ Filter");
+}

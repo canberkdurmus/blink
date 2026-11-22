@@ -3,9 +3,11 @@
 //! `reduce(&State, Action) -> (State, Vec<Effect>)`. The runtime executes effects (scan a folder,
 //! write a sidecar…) and feeds results back as actions.
 
+use crate::filter::{Cond, Filter, ItemMeta};
 use crate::formats::{FileKind, Formats};
 use crate::item::{Item, ScannedFile, build_items};
 use crate::preview::PreviewSource;
+use crate::sort::SortKey;
 use crate::view::{DECODE_AHEAD, Direction, Loupe, Shown, Zoom, prefetch_window};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -148,6 +150,15 @@ pub struct State {
     pub log: Vec<String>,
     /// Mark changes per item (edits, undo, redo): a reload read before the latest one is stale.
     pub mark_gen: BTreeMap<PathBuf, u64>,
+    /// Active filter (FILT-1); its conditions are the top bar's chips.
+    pub filter: Filter,
+    /// Sort order (FILT-2).
+    pub sort: SortKey,
+    /// Capture metadata per item, keyed by primary path, loaded in the background (FILT-1/2).
+    pub meta: BTreeMap<PathBuf, ItemMeta>,
+    /// Indices into `items` that pass the filter, in sort order: what the loupe steps through
+    /// and the counter counts. `current` is always one of them (or `None` when it is empty).
+    pub visible: Vec<usize>,
 }
 
 /// What the runtime needs to load an item's pixels.
@@ -205,7 +216,86 @@ impl State {
             conflicts: Default::default(),
             log: Vec::new(),
             mark_gen: BTreeMap::new(),
+            filter: Filter::default(),
+            sort: SortKey::default(),
+            meta: BTreeMap::new(),
+            visible: Vec::new(),
         }
+    }
+
+    /// Position of the current item in [`State::visible`].
+    pub fn pos(&self) -> Option<usize> {
+        let c = self.current?;
+        self.visible.iter().position(|&i| i == c)
+    }
+
+    /// The visible items, in order.
+    pub fn visible_items(&self) -> impl Iterator<Item = &Item> {
+        self.visible.iter().map(|&i| &self.items[i])
+    }
+
+    fn compute_visible(&self) -> Vec<usize> {
+        let pick = self.prefs.pick_value;
+        crate::sort::order(&self.items, self.sort, &self.marks, &self.meta, |i| {
+            let p = &self.items[i].primary.path;
+            self.filter
+                .matches_meta(&self.items[i], self.marks.get(p), self.meta.get(p), pick)
+        })
+    }
+
+    /// Recompute [`State::visible`] after the filter, sort, items, marks or metadata changed.
+    /// A current item that no longer passes the filter gives way to the item that followed it
+    /// (else the one before it); with nothing visible there is no current item (ADR 0020).
+    fn refresh_view(&mut self, fx: &mut Vec<Effect>) {
+        let new = self.compute_visible();
+        if new == self.visible && self.current.is_none_or(|c| new.contains(&c)) {
+            return;
+        }
+        let old_pos = self.pos();
+        let old = std::mem::replace(&mut self.visible, new);
+        let mut shown = vec![false; self.items.len()];
+        for &i in &self.visible {
+            shown[i] = true;
+        }
+        match self.current {
+            Some(c) if shown.get(c).copied().unwrap_or(false) => {
+                // Same item, new neighbours: prefetch them.
+                fx.extend(self.show_effect());
+            }
+            _ => {
+                let p = old_pos.unwrap_or(0).min(old.len());
+                let next = old[p..]
+                    .iter()
+                    .chain(old[..p].iter().rev())
+                    .copied()
+                    .find(|&i| shown.get(i).copied().unwrap_or(false))
+                    .or(self.visible.first().copied());
+                self.current = None;
+                self.loupe.shown = None;
+                self.loupe.pending_full = false;
+                if let Some(n) = next {
+                    self.go_to(n, fx);
+                }
+            }
+        }
+    }
+
+    /// [`State::refresh_view`] when marks changed and the filter or sort reads them.
+    fn refresh_marks_view(&mut self, fx: &mut Vec<Effect>) {
+        if self.filter.needs_marks() || self.sort.needs_marks() {
+            self.refresh_view(fx);
+        }
+    }
+
+    /// The visible item after (`forward`) or before the current one, clamped to the ends.
+    fn neighbour(&self, forward: bool) -> Option<usize> {
+        let p = self.pos()?;
+        let q = if forward {
+            (p + 1).min(self.visible.len() - 1)
+        } else {
+            p.saturating_sub(1)
+        };
+        self.visible.get(q).copied()
     }
 
     /// Move to item `next` (no-op if it is already current).
@@ -367,15 +457,19 @@ impl State {
                     owns_adobe_name: *owns_adobe_name,
                 }),
         );
-        if let Some(idx) = self.items.iter().position(|i| i.primary.path == edit.path) {
-            self.go_to(idx, fx);
-        }
         *self.mark_gen.entry(edit.path.clone()).or_default() += 1;
         let m = self.marks.entry(edit.path.clone()).or_default();
         if rating {
             m.rating = target.rating;
         } else {
             m.label = target.label.clone();
+        }
+        self.refresh_marks_view(fx);
+        // Back to the item, when the filter shows it.
+        if let Some(idx) = self.items.iter().position(|i| i.primary.path == edit.path)
+            && self.visible.contains(&idx)
+        {
+            self.go_to(idx, fx);
         }
         if forward {
             self.undo.push(edit);
@@ -384,23 +478,23 @@ impl State {
         }
     }
 
-    /// The effect that shows the current item and prefetches its neighbours.
+    /// The effect that shows the current item and prefetches its visible neighbours.
     fn show_effect(&self) -> Option<Effect> {
         let cur = self.current?;
-        let window = prefetch_window(cur, self.items.len(), self.direction);
+        let pos = self.pos()?;
+        let n = self.visible.len();
+        let at = |p: usize| ItemRef::of(&self.items[self.visible[p]]);
+        let window = prefetch_window(pos, n, self.direction);
         let ahead = (1..=DECODE_AHEAD)
-            .map_while(|n| match self.direction {
-                Direction::Forward => cur.checked_add(n).filter(|&i| i < self.items.len()),
-                Direction::Backward => cur.checked_sub(n),
+            .map_while(|k| match self.direction {
+                Direction::Forward => pos.checked_add(k).filter(|&p| p < n),
+                Direction::Backward => pos.checked_sub(k),
             })
-            .map(|i| ItemRef::of(&self.items[i]))
+            .map(at)
             .collect();
         Some(Effect::Show {
             current: ItemRef::of(self.items.get(cur)?),
-            prefetch: window
-                .into_iter()
-                .map(|i| ItemRef::of(&self.items[i]))
-                .collect(),
+            prefetch: window.into_iter().map(at).collect(),
             ahead,
         })
     }
@@ -500,6 +594,16 @@ pub enum Action {
         source: PathBuf,
         error: String,
     },
+    /// Capture metadata of items, keyed by primary path (FILT-1, FILT-2).
+    MetaLoaded(Vec<(PathBuf, ItemMeta)>),
+    /// Add a filter condition, replacing one of the same slot (FILT-1).
+    AddFilter(Cond),
+    /// Remove the filter condition at this index (its chip's ×).
+    RemoveFilter(usize),
+    /// Replace the whole filter (the filter field, CLI expressions).
+    SetFilter(Filter),
+    /// FILT-2.
+    SetSort(SortKey),
     /// Loading failed.
     ImageFailed {
         path: PathBuf,
@@ -639,6 +743,10 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             s.redo.clear();
             s.conflicts.clear();
             s.mark_gen.clear();
+            // Filters belong to the folder they were set on; the sort order is kept (ADR 0020).
+            s.filter = Filter::default();
+            s.meta.clear();
+            s.visible.clear();
             fx.push(Effect::ScanFolder {
                 folder,
                 recursive: s.recursive,
@@ -662,9 +770,14 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             if s.folder.as_ref() == Some(&folder) && s.recursive == recursive {
                 let keep = s.current_item().map(|i| i.primary.path.clone());
                 s.items = build_items(&files, &s.formats);
+                let listed: std::collections::BTreeSet<PathBuf> =
+                    s.items.iter().map(|i| i.primary.path.clone()).collect();
+                s.meta.retain(|p, _| listed.contains(p));
+                s.visible = s.compute_visible();
                 s.current = keep
                     .and_then(|p| s.items.iter().position(|i| i.primary.path == p))
-                    .or((!s.items.is_empty()).then_some(0));
+                    .filter(|c| s.visible.contains(c))
+                    .or(s.visible.first().copied());
                 if s.loupe.shown.as_ref().map(|x| &x.path)
                     != s.current_item().map(|i| &i.primary.path)
                 {
@@ -675,14 +788,13 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             }
         }
         Action::Navigate(nav) => {
-            let len = s.items.len();
-            if let Some(cur) = s.current {
-                let (next, dir) = match nav {
-                    Nav::Next => ((cur + 1).min(len - 1), Direction::Forward),
-                    Nav::Prev => (cur.saturating_sub(1), Direction::Backward),
-                    Nav::First => (0, Direction::Backward),
-                    Nav::Last => (len - 1, Direction::Forward),
-                };
+            let (next, dir) = match nav {
+                Nav::Next => (s.neighbour(true), Direction::Forward),
+                Nav::Prev => (s.neighbour(false), Direction::Backward),
+                Nav::First => (s.visible.first().copied(), Direction::Backward),
+                Nav::Last => (s.visible.last().copied(), Direction::Forward),
+            };
+            if let Some(next) = next.filter(|_| s.current.is_some()) {
                 s.direction = dir;
                 s.go_to(next, &mut fx);
             }
@@ -798,6 +910,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             ..
         } => {
             s.marks.insert(key.clone(), marks.unwrap_or_default());
+            s.refresh_marks_view(&mut fx);
             // Older edits of this item would undo over the other app's change.
             s.undo.retain(|e| e.path != key);
             s.redo.retain(|e| e.path != key);
@@ -823,6 +936,38 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 .unwrap_or_default();
             s.toast = Some(format!("Could not write the sidecar of {name}: {error}"));
         }
+        Action::MetaLoaded(list) => {
+            // Only items of the open folder and mode: a slower read of a previous folder (or
+            // of sub-folders before a recursive toggle) is stale.
+            let listed: std::collections::BTreeSet<&PathBuf> =
+                s.items.iter().map(|i| &i.primary.path).collect();
+            let fresh: Vec<_> = list
+                .into_iter()
+                .filter(|(p, _)| listed.contains(p))
+                .collect();
+            s.meta.extend(fresh);
+            if s.filter.needs_meta() || s.sort == SortKey::CaptureTime {
+                s.refresh_view(&mut fx);
+            }
+        }
+        Action::AddFilter(c) => {
+            s.filter = s.filter.with(c);
+            s.refresh_view(&mut fx);
+        }
+        Action::RemoveFilter(i) => {
+            if i < s.filter.0.len() {
+                s.filter.0.remove(i);
+                s.refresh_view(&mut fx);
+            }
+        }
+        Action::SetFilter(f) => {
+            s.filter = f;
+            s.refresh_view(&mut fx);
+        }
+        Action::SetSort(k) => {
+            s.sort = k;
+            s.refresh_view(&mut fx);
+        }
         Action::MarksLoaded(list) => {
             // Loading runs off-thread: a field the user already set wins over the file's value.
             for (path, m) in list {
@@ -841,6 +986,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 e.rating = e.rating.or(m.rating);
                 e.label = e.label.take().or(m.label);
             }
+            s.refresh_marks_view(&mut fx);
         }
         Action::SetRating { item, rating } => {
             if let Some(it) = s.items.get(item)
@@ -849,6 +995,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 let mut m = s.marks.get(&it.primary.path).cloned().unwrap_or_default();
                 m.rating = Some(rating);
                 s.set_marks(item, m, &mut fx);
+                s.refresh_marks_view(&mut fx);
             }
         }
         Action::SetLabel { item, label } => {
@@ -856,15 +1003,19 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 let mut m = s.marks.get(&it.primary.path).cloned().unwrap_or_default();
                 m.label = label;
                 s.set_marks(item, m, &mut fx);
+                s.refresh_marks_view(&mut fx);
             }
         }
         Action::Mark(key) => {
             if let Some((idx, m)) = s.marks_for_key(key) {
+                // The item after this one before the mark re-sorts or filters it (RATE-1).
+                let next = s.neighbour(true).filter(|&n| n != idx);
                 s.set_marks(idx, m, &mut fx);
-                if s.prefs.auto_advance && idx + 1 < s.items.len() {
+                if let Some(n) = next.filter(|_| s.prefs.auto_advance) {
                     s.direction = Direction::Forward;
-                    s.go_to(idx + 1, &mut fx);
+                    s.go_to(n, &mut fx);
                 }
+                s.refresh_marks_view(&mut fx);
             }
         }
         Action::ToggleAutoAdvance => {
@@ -1657,5 +1808,168 @@ mod tests {
         assert!(same_name_ci(&joined, Path::new("/f/a.arw.XMP")));
         assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/g/a.xmp")));
         assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/f/b.xmp")));
+    }
+
+    fn cur_name(s: &State) -> Option<String> {
+        s.current_item().map(Item::file_name)
+    }
+
+    fn visible_names(s: &State) -> Vec<String> {
+        s.visible_items().map(Item::file_name).collect()
+    }
+
+    #[test]
+    fn req_filt_1_filter_chips_change_what_navigation_steps_through() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW", "d.ARW", "e.JPG"]);
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![
+                (
+                    "/f/b.ARW".into(),
+                    Marks {
+                        rating: Some(3),
+                        label: None,
+                    },
+                ),
+                (
+                    "/f/d.ARW".into(),
+                    Marks {
+                        rating: Some(4),
+                        label: None,
+                    },
+                ),
+                (
+                    "/f/c.ARW".into(),
+                    Marks {
+                        rating: Some(-1),
+                        label: None,
+                    },
+                ),
+            ]),
+        );
+        assert_eq!(s.visible.len(), 5);
+        // Current `a` fails rating ≥ 3: the next passing item becomes current and is shown.
+        let (s, fx) = reduce(&s, Action::AddFilter(Cond::RatingAtLeast(3)));
+        assert_eq!(visible_names(&s), ["b.ARW", "d.ARW"]);
+        assert_eq!(cur_name(&s).as_deref(), Some("b.ARW"));
+        assert!(
+            matches!(&fx[..], [Effect::Show { current, .. }] if current.path == Path::new("/f/b.ARW"))
+        );
+        assert_eq!(s.pos(), Some(0));
+        // Navigation skips hidden items and stops at the ends of the visible list.
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        assert_eq!(cur_name(&s).as_deref(), Some("d.ARW"));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        assert_eq!(cur_name(&s).as_deref(), Some("d.ARW"));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::First));
+        assert_eq!(cur_name(&s).as_deref(), Some("b.ARW"));
+        // A second rating chip replaces the first; a kind chip ANDs with it.
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::RatingEq(4)));
+        assert_eq!(s.filter.0, [Cond::RatingEq(4)]);
+        assert_eq!(cur_name(&s).as_deref(), Some("d.ARW"));
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::Kind(FileKind::Jpeg)));
+        assert!(s.visible.is_empty());
+        assert_eq!(s.current, None);
+        assert_eq!(s.loupe.shown, None);
+        // Nothing to navigate or mark with an empty view.
+        assert!(reduce(&s, Action::Navigate(Nav::Next)).1.is_empty());
+        assert!(reduce(&s, Action::Mark(MarkKey::Stars(2))).1.is_empty());
+        // Removing chips brings items back; the first visible becomes current.
+        let (s, _) = reduce(&s, Action::RemoveFilter(1));
+        assert_eq!(cur_name(&s).as_deref(), Some("d.ARW"));
+        let (s, _) = reduce(&s, Action::SetFilter(Filter::parse("rejected").unwrap()));
+        assert_eq!(visible_names(&s), ["c.ARW"]);
+        let (s, _) = reduce(&s, Action::RemoveFilter(0));
+        assert_eq!(s.visible.len(), 5);
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        // Opening a folder drops the filter.
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::Picked));
+        let (s, _) = reduce(&s, Action::OpenFolder("/g".into()));
+        assert!(s.filter.0.is_empty());
+    }
+
+    #[test]
+    fn req_filt_1_marking_an_item_out_of_the_filter_moves_on_and_undo_brings_it_back() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::NotRejected));
+        // Rejecting the current item hides it; the next one becomes current.
+        let (s, fx) = reduce(&s, Action::Mark(MarkKey::Reject));
+        assert_eq!(visible_names(&s), ["b.ARW", "c.ARW"]);
+        assert_eq!(cur_name(&s).as_deref(), Some("b.ARW"));
+        assert!(fx.iter().any(|e| matches!(e, Effect::WriteSidecar { .. })));
+        // With auto-advance the item after the marked one is current too (not one further).
+        let mut s2 = s.clone();
+        s2.prefs.auto_advance = true;
+        let (s2, _) = reduce(&s2, Action::Mark(MarkKey::Reject));
+        assert_eq!(cur_name(&s2).as_deref(), Some("c.ARW"));
+        // Rejecting the last visible item falls back to the one before it.
+        let (s3, _) = reduce(&s, Action::Navigate(Nav::Last));
+        let (s3, _) = reduce(&s3, Action::Mark(MarkKey::Reject));
+        assert_eq!(cur_name(&s3).as_deref(), Some("b.ARW"));
+        // Undo un-rejects `c` and returns to it.
+        let (s3, _) = reduce(&s3, Action::Undo);
+        assert_eq!(visible_names(&s3), ["b.ARW", "c.ARW"]);
+        assert_eq!(cur_name(&s3).as_deref(), Some("c.ARW"));
+    }
+
+    #[test]
+    fn req_filt_2_sort_orders_navigation_and_metadata_resorts_keeping_the_current_item() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
+        assert_eq!(s.sort, SortKey::CaptureTime);
+        // No capture times yet: filename order.
+        assert_eq!(visible_names(&s), ["a.ARW", "b.ARW", "c.ARW"]);
+        let meta = |p: &str, t: &str| {
+            (
+                PathBuf::from(p),
+                ItemMeta {
+                    captured: Some(t.into()),
+                    ..Default::default()
+                },
+            )
+        };
+        let (s, fx) = reduce(
+            &s,
+            Action::MetaLoaded(vec![
+                meta("/f/a.ARW", "2024:01:01 12:00:02"),
+                meta("/f/b.ARW", "2024:01:01 12:00:03"),
+                meta("/f/c.ARW", "2024:01:01 12:00:01"),
+            ]),
+        );
+        assert_eq!(visible_names(&s), ["c.ARW", "a.ARW", "b.ARW"]);
+        // The current item stays current, with new neighbours to prefetch.
+        assert_eq!(cur_name(&s).as_deref(), Some("a.ARW"));
+        assert_eq!(s.pos(), Some(1));
+        let Some(Effect::Show { prefetch, .. }) = fx.first() else {
+            panic!("{fx:?}")
+        };
+        assert_eq!(prefetch[0].path, Path::new("/f/b.ARW"));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Prev));
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        // Rating sort: highest first, re-sorted when a rating changes; ties by filename.
+        let (s, _) = reduce(&s, Action::SetSort(SortKey::Rating));
+        assert_eq!(visible_names(&s), ["a.ARW", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Stars(5)));
+        assert_eq!(visible_names(&s), ["c.ARW", "a.ARW", "b.ARW"]);
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        let (s, _) = reduce(&s, Action::SetSort(SortKey::FileName));
+        assert_eq!(visible_names(&s), ["a.ARW", "b.ARW", "c.ARW"]);
+        // Metadata for files not listed (a previous folder's slower read) is dropped.
+        let (s, _) = reduce(
+            &s,
+            Action::MetaLoaded(vec![meta("/g/x.ARW", "2024:01:01 00:00:00")]),
+        );
+        assert!(!s.meta.contains_key(Path::new("/g/x.ARW")));
+        // A rescan keeps the sort and drops metadata of items that are gone.
+        let (s, _) = reduce(
+            &s,
+            Action::FolderScanned {
+                folder: "/f".into(),
+                recursive: false,
+                files: scanned("/f", &["c.ARW", "a.ARW"]),
+            },
+        );
+        assert_eq!(visible_names(&s), ["a.ARW", "c.ARW"]);
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        assert!(!s.meta.contains_key(Path::new("/f/b.ARW")));
     }
 }

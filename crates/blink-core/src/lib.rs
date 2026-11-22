@@ -8,6 +8,7 @@ pub mod formats;
 pub mod info;
 pub mod item;
 pub mod preview;
+pub mod sort;
 pub mod state;
 pub mod view;
 

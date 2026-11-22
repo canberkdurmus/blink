@@ -35,6 +35,12 @@ pub struct DirEntry {
 pub trait Fs: Send + Sync {
     /// Read a whole file.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// Read at most the first `len` bytes of a file (metadata scans, FILT-1).
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        let mut b = self.read(path)?;
+        b.truncate(len);
+        Ok(b)
+    }
     /// Metadata of a file or directory (follows symlinks).
     fn metadata(&self, path: &Path) -> io::Result<Meta>;
     /// Entries of a directory, in no particular order.
@@ -89,6 +95,15 @@ fn meta_of(m: &std::fs::Metadata) -> Meta {
 impl Fs for RealFs {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut b = Vec::with_capacity(len.min(1 << 20));
+        std::fs::File::open(path)?
+            .take(len as u64)
+            .read_to_end(&mut b)?;
+        Ok(b)
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Meta> {

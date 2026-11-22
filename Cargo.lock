@@ -519,6 +519,9 @@ dependencies = [
 [[package]]
 name = "blink-core"
 version = "0.0.1"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "blink-decode"
