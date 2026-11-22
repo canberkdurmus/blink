@@ -68,8 +68,8 @@ RATE-3 undo history (ADR 0016 §4). Nothing is half done; no open branches.
 ## M4 Grid, filters, files
 
 - [ ] VIEW-5
-- [ ] FILT-1
-- [ ] FILT-2
+- [x] FILT-1 — `req_filt_1_each_metadata_condition_and_missing_values`, `req_filt_1_filter_algebra`, `req_filt_1_chips_have_labels_and_adding_replaces_the_same_slot`, `req_filt_1_filter_chips_change_what_navigation_steps_through`, `req_filt_1_marking_an_item_out_of_the_filter_moves_on_and_undo_brings_it_back`, `req_filt_1_metadata_is_read_from_the_file_start_and_never_whole`, `req_filt_1_the_metadata_scan_waits_while_the_loader_is_busy`, `req_filt_1_cli_list_filters_by_capture_metadata_on_the_corpus`, `req_filt_1_req_filt_2_filter_results_and_capture_order_on_the_corpus` (corpus), `req_filt_1_req_filt_2_alt_digit_adds_a_removable_chip_and_the_sort_selector_reorders` (UI) (#26, ADR 0020)
+- [x] FILT-2 — `req_filt_2_capture_time_filename_and_rating_orders_with_filename_ties`, `req_filt_2_order_is_independent_of_the_listing_order`, `req_filt_2_sort_orders_navigation_and_metadata_resorts_keeping_the_current_item`, `req_filt_1_req_filt_2_filter_results_and_capture_order_on_the_corpus` (#26)
 - [ ] FILE-1
 - [ ] FILE-2
 - [ ] FILE-3
