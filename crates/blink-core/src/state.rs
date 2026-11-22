@@ -8,7 +8,9 @@ use crate::formats::{FileKind, Formats};
 use crate::item::{Item, ScannedFile, build_items};
 use crate::preview::PreviewSource;
 use crate::sort::SortKey;
-use crate::view::{DECODE_AHEAD, Direction, Loupe, Shown, Zoom, prefetch_window};
+use crate::view::{
+    DECODE_AHEAD, Direction, Loupe, Shown, ThumbSize, ViewMode, Zoom, prefetch_window,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -242,6 +244,10 @@ pub struct State {
     pub filter: Filter,
     /// Sort order (FILT-2).
     pub sort: SortKey,
+    /// Loupe or grid, the grid's cell size, and the loupe's filmstrip (VIEW-5).
+    pub view: ViewMode,
+    pub thumb_size: ThumbSize,
+    pub filmstrip: bool,
     /// Capture metadata per item, keyed by primary path, loaded in the background (FILT-1/2).
     pub meta: BTreeMap<PathBuf, ItemMeta>,
     /// Indices into `items` that pass the filter, in sort order: what the loupe steps through
@@ -310,6 +316,9 @@ impl State {
             file_op: None,
             filter: Filter::default(),
             sort: SortKey::default(),
+            view: ViewMode::default(),
+            thumb_size: ThumbSize::default(),
+            filmstrip: false,
             meta: BTreeMap::new(),
             visible: Vec::new(),
         }
@@ -703,6 +712,15 @@ pub enum Action {
     },
     /// Marks read from sidecars or embedded XMP (RATE-4), keyed by primary path.
     MarksLoaded(Vec<(PathBuf, Marks)>),
+    /// Show the loupe or the grid (`E`/`Enter`, `G`; VIEW-5).
+    SetView(ViewMode),
+    SetThumbSize(ThumbSize),
+    /// `T` (VIEW-5).
+    ToggleFilmstrip,
+    /// Make item `items[i]` current (a click in the grid or filmstrip).
+    Select(usize),
+    /// Move by `delta` places in the visible list, stopping at the ends (grid rows: ±columns).
+    Step(isize),
     /// Files in the open folder were added, removed or renamed by another program (OPEN-3):
     /// rescan it.
     FolderChanged,
@@ -1023,6 +1041,36 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     s.loupe.pending_full = false;
                 }
                 fx.extend(s.show_effect());
+            }
+        }
+        Action::SetView(v) => s.view = v,
+        Action::SetThumbSize(t) => s.thumb_size = t,
+        Action::ToggleFilmstrip => s.filmstrip = !s.filmstrip,
+        Action::Select(i) => {
+            if s.visible.contains(&i) {
+                let from = s.pos();
+                let to = s.visible.iter().position(|&v| v == i);
+                if let (Some(a), Some(b)) = (from, to) {
+                    s.direction = if b >= a {
+                        Direction::Forward
+                    } else {
+                        Direction::Backward
+                    };
+                }
+                s.go_to(i, &mut fx);
+            }
+        }
+        Action::Step(delta) => {
+            if let Some(p) = s.pos() {
+                let last = s.visible.len().saturating_sub(1) as isize;
+                let to = (p as isize + delta).clamp(0, last) as usize;
+                s.direction = if delta >= 0 {
+                    Direction::Forward
+                } else {
+                    Direction::Backward
+                };
+                let next = s.visible[to];
+                s.go_to(next, &mut fx);
             }
         }
         Action::FolderChanged => {
@@ -1537,6 +1585,51 @@ mod tests {
             },
         )
         .0
+    }
+
+    #[test]
+    fn req_view_5_grid_and_loupe_sizes_filmstrip_selection_and_row_steps() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW", "d.ARW", "e.ARW"]);
+        assert_eq!(
+            (s.view, s.thumb_size, s.filmstrip),
+            (ViewMode::Loupe, ThumbSize::Medium, false)
+        );
+        let (s, fx) = reduce(&s, Action::SetView(ViewMode::Grid));
+        assert_eq!(s.view, ViewMode::Grid);
+        assert!(fx.is_empty());
+        let (s, _) = reduce(&s, Action::SetThumbSize(ThumbSize::Large));
+        assert_eq!(s.thumb_size, ThumbSize::Large);
+        let name = |s: &State| {
+            s.current_item().map(|i| {
+                i.primary
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        // A click selects and shows that item (its preview loads for the loupe).
+        let (s, fx) = reduce(&s, Action::Select(3));
+        assert_eq!(name(&s).as_deref(), Some("d.ARW"));
+        assert!(matches!(&fx[..], [Effect::Show { .. }]));
+        // Rows: three columns down from d stops at the last item; up goes back three.
+        let (s, _) = reduce(&s, Action::Step(3));
+        assert_eq!(name(&s).as_deref(), Some("e.ARW"));
+        let (s, _) = reduce(&s, Action::Step(-3));
+        assert_eq!(name(&s).as_deref(), Some("b.ARW"));
+        assert_eq!(s.direction, Direction::Backward);
+        let (s, _) = reduce(&s, Action::Step(-3));
+        assert_eq!(name(&s).as_deref(), Some("a.ARW"));
+        // A filtered-out item can't be selected.
+        let (f, _) = reduce(&s, Action::AddFilter(Cond::RatingAtLeast(1)));
+        let (f2, fx) = reduce(&f, Action::Select(2));
+        assert!(fx.is_empty());
+        assert_eq!(f2.current, f.current);
+        let (s, _) = reduce(&s, Action::ToggleFilmstrip);
+        assert!(s.filmstrip);
+        let (s, _) = reduce(&s, Action::SetView(ViewMode::Loupe));
+        assert_eq!(s.view, ViewMode::Loupe);
     }
 
     #[test]

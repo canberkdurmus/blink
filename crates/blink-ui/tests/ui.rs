@@ -263,6 +263,38 @@ mod full_ui {
         );
         h.snapshot("view_1_loupe_fit");
     }
+
+    /// VIEW-5 acceptance: Linux screenshot goldens of the grid (marks shown on cells) and of
+    /// the loupe with its filmstrip.
+    #[test]
+    fn req_view_5_grid_and_filmstrip_screenshot_goldens() {
+        use blink_core::state::Action;
+        let fs = folder(10);
+        let mut h = Harness::builder()
+            .with_size([800.0, 500.0])
+            .wgpu()
+            .build_ui_state(
+                |ui, app: &mut BlinkApp| app.show(ui),
+                BlinkApp::new(&egui::Context::default(), Some("/f".into()), opts(fs)),
+            );
+        settle(&mut h);
+        h.state_mut()
+            .dispatch(Action::SetRating { item: 1, rating: 3 });
+        h.state_mut().dispatch(Action::SetRating {
+            item: 2,
+            rating: -1,
+        });
+        h.key_press(egui::Key::G);
+        step_until(&mut h, "grid thumbnails", |a| a.grid_visible_drawn());
+        h.step();
+        h.snapshot("view_5_grid");
+        h.key_press(egui::Key::E);
+        h.key_press(egui::Key::T);
+        settle(&mut h);
+        step_until(&mut h, "filmstrip thumbnails", |a| a.grid_visible_drawn());
+        h.step();
+        h.snapshot("view_5_loupe_filmstrip");
+    }
 }
 
 #[test]
@@ -911,4 +943,69 @@ mod full_soak {
             .map_or(1, |d| d.as_nanos() as u64);
         super::soak(secs.max(1), seed);
     }
+}
+
+#[test]
+fn req_view_5_g_shows_the_grid_cells_select_arrows_move_by_rows_and_enter_returns_to_the_loupe() {
+    use blink_core::view::{ThumbSize, ViewMode};
+    use egui::Key;
+    let mut h = harness(folder(12), true);
+    settle(&mut h);
+    h.key_press(Key::G);
+    h.step();
+    assert_eq!(h.state().state().view, ViewMode::Grid);
+    step_until(&mut h, "grid thumbnails", |a| a.grid_visible_drawn());
+    let (done, wanted) = h.state().thumbs_done();
+    assert_eq!(wanted, 12);
+    assert!(done > 0);
+    let name = |a: &BlinkApp| {
+        a.state().current_item().map(|i| {
+            i.primary
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    h.get_by_label("IMG_0005.ARW").click();
+    h.step();
+    h.step();
+    assert_eq!(name(h.state()).as_deref(), Some("IMG_0005.ARW"));
+    // ↓ moves one row: as many items as there are columns (800 px / 172 px cells = 4).
+    h.key_press(Key::ArrowDown);
+    h.step();
+    assert_eq!(name(h.state()).as_deref(), Some("IMG_0009.ARW"));
+    h.key_press(Key::ArrowUp);
+    h.step();
+    assert_eq!(name(h.state()).as_deref(), Some("IMG_0005.ARW"));
+    // Three sizes; the large one has fewer columns.
+    h.state_mut()
+        .dispatch(blink_core::state::Action::SetThumbSize(ThumbSize::Large));
+    h.step();
+    step_until(&mut h, "large thumbnails", |a| a.grid_visible_drawn());
+    h.key_press(Key::ArrowDown);
+    h.step();
+    assert_eq!(name(h.state()).as_deref(), Some("IMG_0007.ARW"));
+    h.key_press(Key::Enter);
+    settle(&mut h);
+    assert_eq!(h.state().state().view, ViewMode::Loupe);
+    assert_eq!(
+        h.state()
+            .displayed()
+            .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned()),
+        Some("IMG_0007.ARW".to_string())
+    );
+    // The filmstrip: T shows it, a click there moves the loupe.
+    h.key_press(Key::T);
+    h.step();
+    assert!(h.state().state().filmstrip);
+    step_until(&mut h, "filmstrip thumbnails", |a| a.grid_visible_drawn());
+    h.get_by_label("IMG_0006.ARW").click();
+    h.step();
+    settle(&mut h);
+    assert_eq!(name(h.state()).as_deref(), Some("IMG_0006.ARW"));
+    h.key_press(Key::T);
+    h.step();
+    assert!(!h.state().state().filmstrip);
 }

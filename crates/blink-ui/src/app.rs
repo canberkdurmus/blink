@@ -12,7 +12,7 @@ use blink_core::sort::SortKey;
 use blink_core::state::{
     Action, Confirm, Effect, FileOpKind, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
 };
-use blink_core::view::Zoom;
+use blink_core::view::{ThumbSize, ViewMode, Zoom};
 use blink_decode::raw::RawBackend;
 use blink_runtime::external::{Launcher, ProcessLauncher};
 use blink_runtime::fs::Fs;
@@ -26,6 +26,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 /// Loupe background: neutral dark grey, no tint (SPEC §5.1).
+mod grid;
+
 pub const LOUPE_BG: Color32 = Color32::from_gray(24);
 /// Full-resolution tiles uploaded per frame, so a 45 MP swap never stalls a frame (PERF-5).
 const FULL_TILES_PER_FRAME: usize = 2;
@@ -175,6 +177,9 @@ pub struct BlinkApp {
     watching: Option<(PathBuf, bool)>,
     /// A folder change was reported; rescan at this time (debounced bursts, OPEN-3).
     rescan_at: Option<Instant>,
+    /// Grid and filmstrip thumbnails (VIEW-5).
+    thumbs: blink_runtime::thumbs::ThumbService,
+    grid: grid::GridState,
     /// Scans running, by folder and mode; `true`: run it again when it returns.
     scans: HashMap<(PathBuf, bool), bool>,
     /// Decode cache cap (PERF-8).
@@ -250,6 +255,13 @@ impl BlinkApp {
                 }
             },
         );
+        let wake = wake_ctx.clone();
+        let thumbs =
+            blink_runtime::thumbs::ThumbService::new(opts.fs.clone(), opts.workers, move || {
+                if let Ok(c) = wake.lock() {
+                    c.request_repaint();
+                }
+            });
         let mut state = State::new(Formats::new(opts.backend.extensions()));
         state.prefs = opts.marks;
         state.toast = opts.notice;
@@ -285,6 +297,8 @@ impl BlinkApp {
             meta_wanted: Vec::new(),
             watching: None,
             rescan_at: None,
+            thumbs,
+            grid: Default::default(),
             scans: HashMap::new(),
             cache_cap,
         };
@@ -415,6 +429,7 @@ impl BlinkApp {
                 // Opening again re-creates the watch (the folder may have been replaced, or
                 // the last watch failed).
                 self.watching = None;
+                self.clear_thumbs();
             }
             let (s, fx) = reduce(&self.state, a);
             let toast_changed = s.toast != self.state.toast;
@@ -682,9 +697,20 @@ impl BlinkApp {
                 .exact_size(300.0)
                 .show(ui, |ui| self.info_panel(ui));
         }
+        let grid = self.state.view == blink_core::view::ViewMode::Grid;
+        if !grid && self.state.filmstrip {
+            egui::Panel::bottom("filmstrip")
+                .resizable(false)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(Color32::from_gray(20))
+                        .inner_margin(4.0),
+                )
+                .show(ui, |ui| self.filmstrip(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(LOUPE_BG))
-            .show(ui, |ui| self.loupe(ui));
+            .show(ui, |ui| if grid { self.grid(ui) } else { self.loupe(ui) });
         self.dialog(ui.ctx());
     }
 
@@ -783,6 +809,16 @@ impl BlinkApp {
                 Key::X if plain => mark(MarkKey::Reject),
                 Key::U if plain => mark(MarkKey::Unflag),
                 Key::A if plain && m.shift => Some(Action::ToggleAutoAdvance),
+                // Grid / loupe and the filmstrip (VIEW-5).
+                Key::G if plain && !m.shift => Some(Action::SetView(ViewMode::Grid)),
+                Key::E | Key::Enter if plain && !m.shift => Some(Action::SetView(ViewMode::Loupe)),
+                Key::T if plain && !m.shift => Some(Action::ToggleFilmstrip),
+                Key::ArrowDown if self.state.view == ViewMode::Grid => {
+                    Some(Action::Step(self.grid.cols.max(1) as isize))
+                }
+                Key::ArrowUp if self.state.view == ViewMode::Grid => {
+                    Some(Action::Step(-(self.grid.cols.max(1) as isize)))
+                }
                 Key::ArrowRight => Some(Action::Navigate(Nav::Next)),
                 Key::ArrowLeft => Some(Action::Navigate(Nav::Prev)),
                 Key::Space if m.shift => Some(Action::Navigate(Nav::Prev)),
@@ -920,6 +956,35 @@ impl BlinkApp {
                 }
                 ui.separator();
                 self.filter_bar(ui, &mut actions);
+                ui.separator();
+                let grid = self.state.view == ViewMode::Grid;
+                if ui
+                    .selectable_label(grid, "Grid")
+                    .on_hover_text("G grid, E or Enter loupe")
+                    .clicked()
+                {
+                    actions.push(Action::SetView(if grid {
+                        ViewMode::Loupe
+                    } else {
+                        ViewMode::Grid
+                    }));
+                }
+                if grid {
+                    for t in ThumbSize::ALL {
+                        if ui
+                            .selectable_label(self.state.thumb_size == t, t.label())
+                            .on_hover_text("Thumbnail size")
+                            .clicked()
+                        {
+                            actions.push(Action::SetThumbSize(t));
+                        }
+                    }
+                } else {
+                    let mut strip = self.state.filmstrip;
+                    if ui.checkbox(&mut strip, "Filmstrip (T)").changed() {
+                        actions.push(Action::ToggleFilmstrip);
+                    }
+                }
                 ui.separator();
                 for z in Zoom::LEVELS {
                     if ui
@@ -1257,7 +1322,12 @@ impl BlinkApp {
     /// Rating, pick/reject and label of the current item for the overlay (SPEC §5.1).
     fn marks_shown(&self) -> Option<Overlay> {
         let item = self.state.current_item()?;
-        let m = self.state.marks.get(&item.primary.path)?;
+        self.marks_of(&item.primary.path)
+    }
+
+    /// The marks overlay of the item whose primary file is `path`.
+    fn marks_of(&self, path: &Path) -> Option<Overlay> {
+        let m = self.state.marks.get(path)?;
         let o = Overlay {
             stars: m.rating.filter(|&r| r > 0).map_or(0, |r| r as u8),
             picked: m.rating == Some(self.state.prefs.pick_value),
@@ -1266,7 +1336,7 @@ impl BlinkApp {
                 let c = self.state.prefs.color_of(&l);
                 (l, c)
             }),
-            conflict: self.state.conflicts.contains(&item.primary.path),
+            conflict: self.state.conflicts.contains(path),
         };
         (o.stars > 0 || o.rejected || o.conflict || o.label.is_some()).then_some(o)
     }
@@ -1607,28 +1677,33 @@ fn star_widget(ui: &mut egui::Ui, n: u8) -> egui::Response {
     let color = Color32::from_gray(230);
     for k in 0..n {
         let c = rect.left_center() + Vec2::new(SIZE * (f32::from(k) + 0.5), 0.0);
-        let (outer, inner) = (SIZE * 0.48, SIZE * 0.2);
-        let pt = |i: usize, r: f32| {
-            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            c + Vec2::new(a.cos(), a.sin()) * r
-        };
-        // A star isn't convex: fill the inner pentagon and the five points separately.
-        let pentagon: Vec<Pos2> = (0..5).map(|i| pt(2 * i + 1, inner)).collect();
-        painter.add(egui::Shape::convex_polygon(
-            pentagon,
-            color,
-            egui::Stroke::NONE,
-        ));
-        for i in 0..5 {
-            let tri = vec![
-                pt((2 * i + 9) % 10, inner),
-                pt(2 * i, outer),
-                pt(2 * i + 1, inner),
-            ];
-            painter.add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
-        }
+        paint_star(&painter, c, SIZE * 0.48, color);
     }
     resp
+}
+
+/// A five-pointed star of outer radius `outer` centred on `c`.
+fn paint_star(painter: &egui::Painter, c: Pos2, outer: f32, color: Color32) {
+    let inner = outer * 0.42;
+    let pt = |i: usize, r: f32| {
+        let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        c + Vec2::new(a.cos(), a.sin()) * r
+    };
+    // A star isn't convex: fill the inner pentagon and the five points separately.
+    let pentagon: Vec<Pos2> = (0..5).map(|i| pt(2 * i + 1, inner)).collect();
+    painter.add(egui::Shape::convex_polygon(
+        pentagon,
+        color,
+        egui::Stroke::NONE,
+    ));
+    for i in 0..5 {
+        let tri = vec![
+            pt((2 * i + 9) % 10, inner),
+            pt(2 * i, outer),
+            pt(2 * i + 1, inner),
+        ];
+        painter.add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
+    }
 }
 
 pub fn apply_theme(ctx: &egui::Context) {

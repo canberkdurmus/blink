@@ -8,6 +8,8 @@
 //! - `next_prefetched` (PERF-2): with prefetch settled, `→` until the new item is drawn.
 //! - `held_key` (PERF-3): `→` repeated at `rate_hz` for `seconds`; ms per item actually drawn,
 //!   and the number of frames that drew another item's pixels (must be 0).
+//! - `grid_cold` (PERF-6): a fresh app, `G`, until the visible thumbnails are drawn and until
+//!   every thumbnail is made.
 //! - `raw_decode` (PERF-5): `Z` on the first item until the RAW decode is drawn; also the longest
 //!   UI frame meanwhile.
 //!
@@ -323,6 +325,51 @@ pub fn run(script: &Script, folder: &Path, opts: impl Fn() -> Options) -> Result
                     metric: "longest UI frame during the RAW decode".into(),
                     budget_ms: 33.0,
                     runs_ms: frames,
+                },
+            ]
+        }
+        "grid_cold" => {
+            // PERF-6: a fresh app (no thumbnails) on the folder, `G`, until every visible cell
+            // shows its thumbnail, and until every item's thumbnail is made.
+            let (mut visible, mut all) = (Vec::new(), Vec::new());
+            for _ in 0..script.runs {
+                let mut h = Headless::launch(folder, opts());
+                while h.app.state().items.is_empty() {
+                    h.frame(&[]);
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                let n = h.app.state().items.len();
+                let t = Instant::now();
+                h.frame(&[egui::Key::G]);
+                let mut seen_visible = None;
+                loop {
+                    h.frame(&[]);
+                    if seen_visible.is_none() && h.app.grid_visible_drawn() {
+                        seen_visible = Some(t.elapsed());
+                    }
+                    let (done, wanted) = h.app.thumbs_done();
+                    if seen_visible.is_some() && wanted == n && done == n {
+                        break;
+                    }
+                    if t.elapsed() > timeout {
+                        return Err(format!("bench: thumbnails stuck at {done} of {wanted}"));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                visible.push(ms(seen_visible.unwrap_or_default()));
+                all.push(ms(t.elapsed()));
+            }
+            vec![
+                metric(
+                    "grid of 2,000, cold: every visible thumbnail drawn",
+                    1000.0,
+                    visible,
+                ),
+                Measured {
+                    id: format!("{}/all", script.id),
+                    metric: "grid of 2,000, cold: every thumbnail made".into(),
+                    budget_ms: 10000.0,
+                    runs_ms: all,
                 },
             ]
         }
