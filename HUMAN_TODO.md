@@ -15,3 +15,6 @@ Non-blocking things for the owner. Newest at the bottom.
   7840U, headless, no GPU upload) are in docs/reports/M2.md. Also check by eye that zooming to
   100 % on a 45 MP RAW (Z, after the decode) doesn't stutter: the headless bench can't time the
   GPU upload of the full-resolution tiles (ADR 0014).
+- [ ] The build machine's disk ran full on 2026-11-22: 870 GB of 937 GB used, about 90 GB of it
+  Blink's `target/` dirs. The agent now removes merged worktrees, but only about 20 GB is free.
+  Please free space outside the repo, or give the agent a larger disk.

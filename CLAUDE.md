@@ -116,3 +116,5 @@ last 30 lines; move older lines to `docs/history.md`.
 - Auto mode blocks force-pushes: after rebasing a pushed branch, push it under a new branch name.
 - Session start: also check `git worktree list` and `gh pr list`. A session stopped at its usage cap can leave PRs and uncommitted worktrees that PROGRESS.md doesn't mention.
 - Workspace feature unification hides missing dependency features: a crate can build in the workspace and fail alone. CI's guard job runs `cargo check -p` per crate.
+- Every git worktree has its own `target/` (~16 GB). Remove a worktree once its PR is merged; "No space left on device" shows up as a rustc ICE.
+- Local `cargo fuzz` needs `--target x86_64-unknown-linux-gnu` (the default musl target fails to build).
