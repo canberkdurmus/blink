@@ -13,6 +13,9 @@ pub struct Launch {
     pub args: Vec<OsString>,
 }
 
+/// How long [`ProcessLauncher`] watches a started program for a failing exit.
+const LAUNCH_WATCH: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Starts a process and doesn't wait for it.
 pub trait Launcher: Send + Sync {
     fn launch(&self, cmd: &Launch) -> std::io::Result<()>;
@@ -30,7 +33,27 @@ impl Launcher for ProcessLauncher {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        // Reap it when it exits so it never lingers as a zombie.
+        // Launchers (`open -a`, `xdg-open`) start the app and exit at once, non-zero when they
+        // can't: watch briefly so that shows as an error rather than "Opened". Explorer exits
+        // 1 even on success. The caller is already off the UI thread.
+        let reports_status = !cmd
+            .program
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("explorer.exe"));
+        let deadline = std::time::Instant::now() + LAUNCH_WATCH;
+        while reports_status && std::time::Instant::now() < deadline {
+            match child.try_wait()? {
+                Some(st) if !st.success() => {
+                    return Err(std::io::Error::other(format!(
+                        "{} failed ({st})",
+                        cmd.program.display()
+                    )));
+                }
+                Some(_) => return Ok(()),
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        // Still running (the app itself): reap it when it exits so it never lingers as a zombie.
         std::thread::spawn(move || {
             let _ = child.wait();
         });
@@ -140,6 +163,24 @@ mod tests {
     use super::*;
     use crate::fs::MemFs;
     use blink_core::external::{TargetOs, default_apps};
+
+    #[cfg(unix)]
+    #[test]
+    fn req_file_3_a_launcher_that_fails_at_once_is_an_error_and_one_that_runs_is_not() {
+        let run = |prog: &str, args: &[&str]| {
+            ProcessLauncher.launch(&Launch {
+                program: prog.into(),
+                args: args.iter().map(OsString::from).collect(),
+            })
+        };
+        // Like `open -a missing-app`: exits 1 straight away.
+        let e = run("sh", &["-c", "exit 1"]).unwrap_err();
+        assert!(e.to_string().contains("failed"), "{e}");
+        assert!(run("sh", &["-c", "exit 0"]).is_ok());
+        // The app itself keeps running past the watch: success.
+        assert!(run("sleep", &["3"]).is_ok());
+        assert!(run("/no/such/program", &[]).is_err());
+    }
 
     #[test]
     fn req_file_3_version_folders_compare_numerically() {

@@ -31,7 +31,10 @@ configured, or how Windows programs are found.
    broken, the defaults are kept.
 4. **UI.** `Ctrl+Shift+E` opens the current item in the first app of the list, and an "Open in"
    menu lists them all. A launch result or error shows in the toast, and errors also go to the
-   log. `ProcessLauncher` spawns with null stdio and reaps the child on a thread. Tests use a
+   log. `ProcessLauncher` spawns with null stdio. It watches the child for 1.5 s, so a launcher that
+   fails at once (`open -a` without the app, `xdg-open` without a handler) is reported as an error.
+   `explorer.exe` is excepted because it exits 1 even on success. A child still running after that
+   is reaped on a thread. Tests use a
    recording `Launcher`.
 
 ## Consequences
