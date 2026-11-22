@@ -67,10 +67,36 @@ pub trait Fs: Send + Sync {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         Err(read_only(dir))
     }
-    /// Remove a file Blink created: a temp file, or a sidecar that an undo takes back.
+    /// Remove a file Blink created: a temp file, or a sidecar that an undo takes back. Both
+    /// file systems refuse anything else ([`crate::atomic::may_remove`]).
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         Err(read_only(path))
     }
+    /// Create one directory (its parent must exist).
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        Err(read_only(path))
+    }
+    /// Move a file to `to` on the same volume, failing with `AlreadyExists` if `to` exists: a
+    /// move never replaces a file (FILE-1, FILE-2).
+    fn move_file(&self, from: &Path, _to: &Path) -> io::Result<()> {
+        Err(read_only(from))
+    }
+    /// Move a file to the operating system's trash (FILE-1).
+    fn trash(&self, path: &Path) -> io::Result<()> {
+        Err(read_only(path))
+    }
+    /// Copy a file to `to`, durable when it returns, failing with `AlreadyExists` if `to` exists
+    /// (FILE-2). A failed copy leaves nothing at `to`.
+    fn copy_file(&self, from: &Path, _to: &Path) -> io::Result<()> {
+        Err(read_only(from))
+    }
+}
+
+fn refuse_unlink(p: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("refusing to unlink a source file: {}", p.display()),
+    )
 }
 
 fn read_only(p: &Path) -> io::Error {
@@ -167,8 +193,121 @@ impl Fs for RealFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if !crate::atomic::may_remove(path) {
+            return Err(refuse_unlink(path));
+        }
         std::fs::remove_file(path)
     }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        std::fs::create_dir(path)
+    }
+
+    fn move_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // Check, then rename: another program creating `to` in between would be replaced. Blink
+        // never does; ADR 0021 accepts the window (no portable no-replace rename in std).
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        std::fs::rename(from, to)
+    }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        // Into a temp file next to `to`, made durable, then moved into place: a crash or a full
+        // disk never leaves a partial copy under the real name.
+        let tmp = crate::atomic::temp_path(to);
+        let copied = (|| {
+            let mut src = std::fs::File::open(from)?;
+            let mut dst = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            std::io::copy(&mut src, &mut dst)?;
+            dst.sync_all()
+        })();
+        let placed = copied.and_then(|()| self.move_file(&tmp, to));
+        if placed.is_err() {
+            let _ = self.remove_file(&tmp);
+        }
+        placed
+    }
+
+    fn trash(&self, path: &Path) -> io::Result<()> {
+        trash_moves_without_copying(path)?;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut ctx = trash::TrashContext::default();
+        #[cfg(target_os = "macos")]
+        {
+            // NSFileManager: no Finder automation prompt, no sound (ADR 0021).
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+            ctx.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        ctx.delete(path)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+}
+
+/// Refuse to trash a file unless the OS trash takes it with a rename (ADR 0021). Linux: the
+/// `trash` crate falls back to the home trash on volumes without a usable top-directory trash,
+/// and moves across volumes by copy + unlink; so the file must be on the home trash's volume.
+/// Windows: a volume without a Recycle Bin (most removable drives) may delete for good, so its
+/// root must hold `$Recycle.Bin`. macOS: NSFileManager fails rather than deletes.
+fn trash_moves_without_copying(path: &Path) -> io::Result<()> {
+    let refuse = |why: &str| -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{}: {why}; set rejects = \"folder\" in config.toml",
+                path.display()
+            ),
+        ))
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let home_trash = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+            .map(|d| d.join("Trash"));
+        let dev = |p: &Path| {
+            p.ancestors()
+                .find_map(|a| std::fs::metadata(a).ok())
+                .map(|m| m.dev())
+        };
+        let file_dev = std::fs::metadata(path)?.dev();
+        if home_trash.as_deref().and_then(dev) != Some(file_dev) {
+            return refuse(
+                "not on the same volume as the trash (it would be copied, then deleted)",
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let root: PathBuf = path
+            .components()
+            .take_while(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+            .collect();
+        if !root.join("$Recycle.Bin").exists() {
+            return refuse("this drive has no Recycle Bin (the file could be deleted for good)");
+        }
+    }
+    let _ = refuse;
+    Ok(())
 }
 
 /// One call made against a [`MemFs`].
@@ -184,6 +323,10 @@ pub enum FsCall {
     Rename(PathBuf, PathBuf),
     SyncDir(PathBuf),
     RemoveFile(PathBuf),
+    CreateDir(PathBuf),
+    MoveFile(PathBuf, PathBuf),
+    CopyFile(PathBuf, PathBuf),
+    Trash(PathBuf),
 }
 
 impl FsCall {
@@ -198,8 +341,11 @@ impl FsCall {
     /// The paths a write call changes (empty for reads and syncs).
     pub fn changed_paths(&self) -> Vec<&Path> {
         match self {
-            Self::WriteNew(p) | Self::RemoveFile(p) => vec![p],
-            Self::Rename(a, b) => vec![a, b],
+            Self::WriteNew(p) | Self::RemoveFile(p) | Self::CreateDir(p) | Self::Trash(p) => {
+                vec![p]
+            }
+            Self::Rename(a, b) | Self::MoveFile(a, b) => vec![a, b],
+            Self::CopyFile(_, b) => vec![b],
             _ => vec![],
         }
     }
@@ -545,6 +691,12 @@ impl Fs for MemFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
+        // Every test runs on this file system: unlinking a source file fails the test (FILE-1).
+        assert!(
+            crate::atomic::may_remove(path),
+            "FILE-1 violation: unlink of a source file {}",
+            path.display()
+        );
         self.write_step(FsCall::RemoveFile(path.to_path_buf()))?;
         let bytes = lock(&self.files)
             .remove(path)
@@ -557,6 +709,83 @@ impl Fs for MemFs {
             bytes,
         });
         Ok(())
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.write_step(FsCall::CreateDir(path.to_path_buf()))?;
+        if lock(&self.dirs).contains_key(path) || lock(&self.files).contains_key(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                path.display().to_string(),
+            ));
+        }
+        if !self.dir_exists(path) {
+            return Err(not_found(path));
+        }
+        lock(&self.dirs).insert(path.to_path_buf(), false);
+        Ok(())
+    }
+
+    fn move_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.write_step(FsCall::MoveFile(from.to_path_buf(), to.to_path_buf()))?;
+        if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        if !self.dir_exists(to) {
+            return Err(not_found(to));
+        }
+        let bytes = lock(&self.files)
+            .remove(from)
+            .ok_or_else(|| not_found(from))?;
+        lock(&self.files).insert(to.to_path_buf(), bytes);
+        let mut m = lock(&self.mtimes);
+        if let Some(t) = m.remove(from) {
+            m.insert(to.to_path_buf(), t);
+        }
+        Ok(())
+    }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.write_step(FsCall::CopyFile(from.to_path_buf(), to.to_path_buf()))?;
+        if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        if !self.dir_exists(to) {
+            return Err(not_found(to));
+        }
+        let bytes = lock(&self.files)
+            .get(from)
+            .cloned()
+            .ok_or_else(|| not_found(from))?;
+        lock(&self.files).insert(to.to_path_buf(), bytes);
+        Ok(())
+    }
+
+    fn trash(&self, path: &Path) -> io::Result<()> {
+        self.write_step(FsCall::Trash(path.to_path_buf()))?;
+        lock(&self.files)
+            .remove(path)
+            .map(|_| ())
+            .ok_or_else(|| not_found(path))
+    }
+}
+
+impl MemFs {
+    /// Files moved to the trash so far, in order (they are gone from the file system).
+    pub fn trashed(&self) -> Vec<PathBuf> {
+        self.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                FsCall::Trash(p) => Some(p),
+                _ => None,
+            })
+            .collect()
     }
 }
 

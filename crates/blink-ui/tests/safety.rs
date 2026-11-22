@@ -1,4 +1,4 @@
-//! FILE-7: a full GUI session on real files (the whole corpus plus synthetic pairs and foreign
+//! FILE-7 (and FILE-1 apply rejects + undo): a full GUI session on real files (the whole corpus plus synthetic pairs and foreign
 //! sidecars, copied to a temp folder) never changes a byte of any RAW/JPEG/HEIF file.
 
 mod full_safety {
@@ -42,6 +42,15 @@ mod full_safety {
                 return;
             }
             assert!(t.elapsed() < Duration::from_secs(120), "never settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn wait(h: &mut Harness<'static, BlinkApp>, done: impl Fn(&BlinkApp) -> bool) {
+        let t = Instant::now();
+        while !done(h.state()) {
+            assert!(t.elapsed() < Duration::from_secs(60), "timed out");
+            h.step();
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -116,6 +125,33 @@ mod full_safety {
             h.state_mut().dispatch(Action::Navigate(Nav::Next));
             settle(&mut h);
         }
+        // FILE-1 on the real file system: apply rejects, check the moved bytes, undo.
+        let rejected: usize = (0..n).filter(|i| i % 7 == 0).count();
+        h.state_mut().dispatch(Action::ApplyRejects);
+        h.state_mut().dispatch(Action::Confirm);
+        wait(&mut h, |a| a.state().items.len() == n - rejected);
+        let moved = dir.join("_rejected");
+        let mut in_rejected = 0;
+        for e in std::fs::read_dir(&moved).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "xmp") {
+                continue;
+            }
+            assert_eq!(
+                before.get(&dir.join(p.file_name().unwrap())),
+                Some(&digest(&p)),
+                "{} moved intact",
+                p.display()
+            );
+            in_rejected += 1;
+        }
+        assert!(in_rejected >= rejected);
+        h.state_mut().dispatch(Action::Undo);
+        wait(&mut h, |a| {
+            a.state().items.len() == n && !a.state().file_op_running
+        });
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0);
+        std::fs::remove_dir(&moved).unwrap();
         h.state().flush_sidecars();
         drop(h);
 

@@ -3,6 +3,7 @@
 //! This crate performs no I/O (SPEC §8.2).
 #![forbid(unsafe_code)]
 
+pub mod export;
 pub mod filter;
 pub mod formats;
 pub mod info;

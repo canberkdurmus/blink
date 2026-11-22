@@ -15,6 +15,18 @@ pub fn is_sidecar_path(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
 }
 
+/// Whether Blink may unlink `path`: only a sidecar (undo of a sidecar Blink created) or one of
+/// its own temp files. Source files are never unlinked (SPEC §1, FILE-1); both file systems
+/// enforce this in [`crate::fs::Fs::remove_file`].
+pub fn may_remove(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let temp = name.starts_with('.') && name.ends_with(".tmp") && name.contains(".blink-");
+    temp || is_sidecar_path(path)
+}
+
 fn refuse(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -66,4 +78,34 @@ pub fn remove_sidecar(fs: &dyn Fs, target: &Path) -> io::Result<()> {
     }
     fs.remove_file(target)?;
     fs.sync_dir(dir_of(target))
+}
+
+/// Whether `path` may be written as an item list export (FILE-2): `.txt` or `.csv` only, so a
+/// save dialog can never overwrite a photo or a sidecar.
+pub fn is_export_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("csv"))
+}
+
+/// Write an item list atomically, replacing an existing `.txt`/`.csv` (the save dialog asked).
+pub fn write_export(fs: &dyn Fs, target: &Path, bytes: &[u8]) -> io::Result<()> {
+    if !is_export_path(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "an item list must be a .txt or .csv file: {}",
+                target.display()
+            ),
+        ));
+    }
+    let tmp = temp_path(target);
+    let r = fs
+        .write_new(&tmp, bytes)
+        .and_then(|()| fs.sync_file(&tmp))
+        .and_then(|()| fs.rename(&tmp, target))
+        .and_then(|()| fs.sync_dir(dir_of(target)));
+    if r.is_err() {
+        let _ = fs.remove_file(&tmp);
+    }
+    r
 }

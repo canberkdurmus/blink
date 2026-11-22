@@ -55,6 +55,8 @@ pub struct MarkPrefs {
     pub auto_advance: bool,
     /// `xmp:Label` value written for each colour (SPEC §6: configurable).
     pub label_names: [String; 5],
+    /// Apply rejects moves to the OS trash instead of `_rejected/` (FILE-1; config `rejects`).
+    pub reject_to_trash: bool,
 }
 
 impl Default for MarkPrefs {
@@ -63,6 +65,7 @@ impl Default for MarkPrefs {
             pick_value: 1,
             auto_advance: false,
             label_names: ["Red", "Yellow", "Green", "Blue", "Purple"].map(String::from),
+            reject_to_trash: false,
         }
     }
 }
@@ -114,6 +117,81 @@ pub struct MarkEdit {
     pub targets: Vec<(PathBuf, bool)>,
 }
 
+/// One undoable move of files: apply rejects to `_rejected/` (FILE-1), or its undo/redo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesEdit {
+    /// Each file's move, `(from, to)`, in the order they were made.
+    pub moves: Vec<(PathBuf, PathBuf)>,
+}
+
+impl FilesEdit {
+    /// The moves that take this edit back, newest first.
+    pub fn reversed(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.moves
+            .iter()
+            .rev()
+            .map(|(a, b)| (b.clone(), a.clone()))
+            .collect()
+    }
+}
+
+/// One entry of the undo history (RATE-3): a mark change or a file operation (ADR 0016, 0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edit {
+    Mark(MarkEdit),
+    Files(FilesEdit),
+}
+
+impl Edit {
+    fn as_mark(&self) -> Option<&MarkEdit> {
+        match self {
+            Self::Mark(m) => Some(m),
+            Self::Files(_) => None,
+        }
+    }
+}
+
+/// Which file operation a [`Action::FilesMoved`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOpKind {
+    /// Apply rejects (FILE-1).
+    ApplyRejects { to_trash: bool },
+    /// Copy (`copy`) or move the filtered items to another folder (FILE-2).
+    Transfer { copy: bool },
+    /// Undo of a [`FilesEdit`].
+    Undo,
+    /// Redo of a [`FilesEdit`].
+    Redo,
+}
+
+/// A file operation for the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOp {
+    /// Move every member of each item and every sidecar it has to `_rejected/` in the item's
+    /// folder, or to the OS trash (FILE-1). Per item: each member (primary first) and whether it
+    /// owns the Adobe-style sidecar name (FILE-4), so a `stem.xmp` that other files share stays.
+    Rejects {
+        items: Vec<Vec<(PathBuf, bool)>>,
+        to_trash: bool,
+    },
+    /// Make exactly these moves (undo/redo), in order.
+    Moves(Vec<(PathBuf, PathBuf)>),
+    /// Copy or move every member and sidecar of each item into `dest` (FILE-2). Members as in
+    /// [`FileOp::Rejects`].
+    Transfer {
+        items: Vec<Vec<(PathBuf, bool)>>,
+        dest: PathBuf,
+        copy: bool,
+    },
+}
+
+/// A dialog waiting for the user's answer (SPEC §5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirm {
+    /// "Apply rejects": `count` rejected items go to `_rejected/` or the trash (FILE-1).
+    ApplyRejects { count: usize, to_trash: bool },
+}
+
 impl MarkEdit {
     fn rating_changed(&self) -> bool {
         self.rating
@@ -139,10 +217,20 @@ pub struct State {
     pub toast: Option<String>,
     /// Pick value, auto-advance, label names (RATE-1, RATE-2).
     pub prefs: MarkPrefs,
-    /// Applied mark edits, oldest first (RATE-3).
-    pub undo: Vec<MarkEdit>,
+    /// Applied edits, oldest first (RATE-3).
+    pub undo: Vec<Edit>,
     /// Undone edits, most recently undone last.
-    pub redo: Vec<MarkEdit>,
+    pub redo: Vec<Edit>,
+    /// The open dialog, if any.
+    pub confirm: Option<Confirm>,
+    /// A file operation is running: undo, redo and apply rejects wait for its result.
+    pub file_op_running: bool,
+    /// Copies running (FILE-2). They move nothing, so marks keep working; only operations
+    /// that move files wait for them.
+    pub copies_running: usize,
+    /// The running operation's folder and, for undo/redo, the moves it asked for: moves that
+    /// didn't happen stay in the history, and a result for another folder isn't recorded.
+    pub file_op: Option<(PathBuf, Vec<(PathBuf, PathBuf)>)>,
     /// Items whose sidecar changed on disk while Blink had unsaved changes for it: the on-disk
     /// version was kept (FILE-8). Shown as a conflict marker until the item is marked again.
     pub conflicts: std::collections::BTreeSet<PathBuf>,
@@ -216,6 +304,10 @@ impl State {
             conflicts: Default::default(),
             log: Vec::new(),
             mark_gen: BTreeMap::new(),
+            confirm: None,
+            file_op_running: false,
+            copies_running: 0,
+            file_op: None,
             filter: Filter::default(),
             sort: SortKey::default(),
             meta: BTreeMap::new(),
@@ -351,6 +443,7 @@ impl State {
     fn touched(&self, path: &std::path::Path, rating: bool) -> bool {
         self.undo
             .iter()
+            .filter_map(Edit::as_mark)
             .any(|e| e.path == path && e.rating_changed() == rating)
     }
 
@@ -407,14 +500,14 @@ impl State {
                 .collect();
             fx.extend(writes);
             let before_original = !self.touched(&path, rating);
-            self.undo.push(MarkEdit {
+            self.undo.push(Edit::Mark(MarkEdit {
                 path: path.clone(),
                 rating,
                 before: before.clone(),
                 after: after.clone(),
                 before_original,
                 targets,
-            });
+            }));
             self.redo.clear();
             self.marks.insert(path.clone(), after.clone());
             before = after;
@@ -439,6 +532,28 @@ impl State {
                 .into(),
             );
             return;
+        };
+        let edit = match edit {
+            Edit::Mark(m) => m,
+            Edit::Files(f) => {
+                // The edit goes back on the other stack when the runtime reports the moves.
+                let moves = if forward {
+                    f.moves.clone()
+                } else {
+                    f.reversed()
+                };
+                self.file_op_running = true;
+                self.file_op = self.folder.clone().map(|d| (d, moves.clone()));
+                fx.push(Effect::FileOp {
+                    op: FileOp::Moves(moves),
+                    kind: if forward {
+                        FileOpKind::Redo
+                    } else {
+                        FileOpKind::Undo
+                    },
+                });
+                return;
+            }
         };
         let rating = edit.rating_changed();
         let target = if forward { &edit.after } else { &edit.before };
@@ -472,10 +587,69 @@ impl State {
             self.go_to(idx, fx);
         }
         if forward {
-            self.undo.push(edit);
+            self.undo.push(Edit::Mark(edit));
         } else {
-            self.redo.push(edit);
+            self.redo.push(Edit::Mark(edit));
         }
+    }
+
+    /// Drop the items whose primary is in `gone` (moved away by a file operation). The current
+    /// item, if dropped, gives way to the next visible item (else the previous one).
+    fn remove_items(&mut self, gone: &std::collections::BTreeSet<PathBuf>, fx: &mut Vec<Effect>) {
+        if !self.items.iter().any(|i| gone.contains(&i.primary.path)) {
+            return;
+        }
+        let p = self.pos().unwrap_or(0).min(self.visible.len());
+        let path_at = |s: &Self, i: usize| s.items[i].primary.path.clone();
+        let next = self.visible[p..]
+            .iter()
+            .chain(self.visible[..p].iter().rev())
+            .map(|&i| path_at(self, i))
+            .find(|q| !gone.contains(q));
+        let cur = self.current_item().map(|i| i.primary.path.clone());
+        self.items.retain(|i| !gone.contains(&i.primary.path));
+        self.visible = self.compute_visible();
+        let next = next.and_then(|q| self.items.iter().position(|i| i.primary.path == q));
+        let same = cur.is_some() && next.map(|n| path_at(self, n)) == cur;
+        if same {
+            // Indices shifted; the item is the same.
+            self.current = next;
+            fx.extend(self.show_effect());
+        } else {
+            self.current = None;
+            self.loupe.shown = None;
+            self.loupe.pending_full = false;
+            if let Some(n) = next {
+                self.go_to(n, fx);
+            }
+        }
+    }
+
+    /// Each member of `items[i]` with whether it owns the Adobe-style sidecar name (FILE-4).
+    fn members_of(&self, i: usize) -> Vec<(PathBuf, bool)> {
+        sidecar_writes(&self.items, i, &MarkChange::RevertLabel)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::WriteSidecar {
+                    source,
+                    owns_adobe_name,
+                    ..
+                } => Some((source, owns_adobe_name)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Indices of the folder's rejected items (all of them, whatever the filter shows).
+    fn rejected_items(&self) -> Vec<usize> {
+        (0..self.items.len())
+            .filter(|&i| {
+                self.marks
+                    .get(&self.items[i].primary.path)
+                    .and_then(|m| m.rating)
+                    == Some(-1)
+            })
+            .collect()
     }
 
     /// The effect that shows the current item and prefetches its visible neighbours.
@@ -604,6 +778,35 @@ pub enum Action {
     SetFilter(Filter),
     /// FILT-2.
     SetSort(SortKey),
+    /// `Ctrl+Shift+Delete`: ask to move the rejected items away (FILE-1). Always confirms.
+    ApplyRejects,
+    /// The open dialog's OK.
+    Confirm,
+    /// Copy or move the filtered (visible) items to `dest` (FILE-2).
+    Transfer {
+        dest: PathBuf,
+        copy: bool,
+    },
+    /// Save the filtered items as a `.txt` path list or a `.csv` (FILE-2).
+    ExportList {
+        path: PathBuf,
+        csv: bool,
+    },
+    /// Result of [`Effect::WriteExport`].
+    ExportWritten {
+        path: PathBuf,
+        error: Option<String>,
+    },
+    /// The open dialog's Cancel (or Escape).
+    CancelDialog,
+    /// Result of [`Effect::FileOp`]: the moves made (`(from, to)`, in order), the files moved
+    /// to the trash, and one message per file that failed.
+    FilesMoved {
+        kind: FileOpKind,
+        moves: Vec<(PathBuf, PathBuf)>,
+        trashed: Vec<PathBuf>,
+        errors: Vec<String>,
+    },
     /// Loading failed.
     ImageFailed {
         path: PathBuf,
@@ -649,6 +852,17 @@ pub enum Effect {
     /// Load the full-resolution image of `item`: its paired JPEG if any, else a RAW decode.
     LoadFull {
         item: ItemRef,
+    },
+    /// Move files (FILE-1); answer with [`Action::FilesMoved`] of the same `kind`. Pending
+    /// sidecar writes of the files are flushed first.
+    FileOp {
+        op: FileOp,
+        kind: FileOpKind,
+    },
+    /// Write an item list (FILE-2) atomically; answer with [`Action::ExportWritten`].
+    WriteExport {
+        path: PathBuf,
+        contents: String,
     },
 }
 
@@ -741,6 +955,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             // Undo history is per folder: its items are gone (ADR 0016).
             s.undo.clear();
             s.redo.clear();
+            s.confirm = None;
             s.conflicts.clear();
             s.mark_gen.clear();
             // Filters belong to the folder they were set on; the sort order is kept (ADR 0020).
@@ -912,8 +1127,9 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             s.marks.insert(key.clone(), marks.unwrap_or_default());
             s.refresh_marks_view(&mut fx);
             // Older edits of this item would undo over the other app's change.
-            s.undo.retain(|e| e.path != key);
-            s.redo.retain(|e| e.path != key);
+            let other = |e: &Edit| e.as_mark().is_none_or(|m| m.path != key);
+            s.undo.retain(other);
+            s.redo.retain(other);
             let name = key
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -974,6 +1190,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 // An edit made before the load recorded "nothing" as the original value: it
                 // is the file's (undo then shows what the revert puts back on disk).
                 for ed in s.undo.iter_mut().chain(s.redo.iter_mut()) {
+                    let Edit::Mark(ed) = ed else { continue };
                     if ed.path == path && ed.before_original {
                         if ed.rating_changed() {
                             ed.before.rating = ed.before.rating.or(m.rating);
@@ -987,6 +1204,12 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 e.label = e.label.take().or(m.label);
             }
             s.refresh_marks_view(&mut fx);
+        }
+        Action::SetRating { .. } | Action::SetLabel { .. } | Action::Mark(_)
+            if s.file_op_running =>
+        {
+            // A late sidecar write would recreate a sidecar next to a file that just moved.
+            s.toast = Some("A file operation is still running".into());
         }
         Action::SetRating { item, rating } => {
             if let Some(it) = s.items.get(item)
@@ -1029,8 +1252,213 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 .into(),
             );
         }
+        Action::Undo | Action::Redo if s.file_op_running => {
+            s.toast = Some("A file operation is still running".into());
+        }
+        Action::Undo | Action::Redo
+            if s.copies_running > 0
+                && (matches!(action, Action::Undo)
+                    && matches!(s.undo.last(), Some(Edit::Files(_)))
+                    || matches!(action, Action::Redo)
+                        && matches!(s.redo.last(), Some(Edit::Files(_)))) =>
+        {
+            // Moving files back or again would pull them from under the copy.
+            s.toast = Some("A copy is still running".into());
+        }
         Action::Undo => s.step_history(false, &mut fx),
         Action::Redo => s.step_history(true, &mut fx),
+        Action::ApplyRejects => {
+            let count = s.rejected_items().len();
+            if s.file_op_running {
+                s.toast = Some("A file operation is still running".into());
+            } else if s.copies_running > 0 {
+                s.toast = Some("A copy is still running".into());
+            } else if count == 0 {
+                s.toast = Some("No rejected items".into());
+            } else {
+                s.confirm = Some(Confirm::ApplyRejects {
+                    count,
+                    to_trash: s.prefs.reject_to_trash,
+                });
+            }
+        }
+        Action::Confirm => {
+            if let Some(Confirm::ApplyRejects { to_trash, .. }) = s.confirm.take() {
+                let items: Vec<Vec<(PathBuf, bool)>> = s
+                    .rejected_items()
+                    .into_iter()
+                    .map(|i| s.members_of(i))
+                    .collect();
+                if !items.is_empty() && !s.file_op_running {
+                    s.file_op_running = true;
+                    s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
+                    fx.push(Effect::FileOp {
+                        op: FileOp::Rejects { items, to_trash },
+                        kind: FileOpKind::ApplyRejects { to_trash },
+                    });
+                }
+            }
+        }
+        Action::CancelDialog => s.confirm = None,
+        Action::Transfer { dest, copy } => {
+            if s.file_op_running {
+                s.toast = Some("A file operation is still running".into());
+            } else if !copy && s.copies_running > 0 {
+                s.toast = Some("A copy is still running".into());
+            } else if s.visible.is_empty() {
+                s.toast = Some("No items to copy or move".into());
+            } else {
+                let items = s.visible.iter().map(|&i| s.members_of(i)).collect();
+                if copy {
+                    s.copies_running += 1;
+                } else {
+                    s.file_op_running = true;
+                    s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
+                }
+                fx.push(Effect::FileOp {
+                    op: FileOp::Transfer { items, dest, copy },
+                    kind: FileOpKind::Transfer { copy },
+                });
+            }
+        }
+        Action::ExportList { path, csv } => {
+            let contents =
+                crate::export::item_list(s.visible_items(), &s.marks, s.prefs.pick_value, csv);
+            fx.push(Effect::WriteExport { path, contents });
+        }
+        Action::ExportWritten { path, error } => {
+            let name = path.display();
+            s.toast = Some(match error {
+                None => format!("Saved the item list to {name}"),
+                Some(e) => format!("Could not save {name}: {e}"),
+            });
+        }
+        Action::FilesMoved {
+            kind: FileOpKind::Transfer { copy: true },
+            moves,
+            trashed,
+            errors,
+        } => {
+            s.copies_running = s.copies_running.saturating_sub(1);
+            let _ = trashed;
+            let copied: std::collections::BTreeSet<&PathBuf> =
+                moves.iter().map(|(f, _)| f).collect();
+            let n = s
+                .items
+                .iter()
+                .filter(|i| copied.contains(&i.primary.path))
+                .count();
+            s.toast = Some(if errors.is_empty() {
+                format!("Copied {n} items")
+            } else {
+                s.log.push(format!(
+                    "Some files could not be copied: {}",
+                    errors.join("; ")
+                ));
+                format!(
+                    "Copied {n} items; {} files could not be copied",
+                    errors.len()
+                )
+            });
+        }
+        Action::FilesMoved {
+            kind,
+            moves,
+            trashed,
+            errors,
+        } => {
+            s.file_op_running = false;
+            let (op_folder, requested) = s.file_op.take().unzip();
+            if op_folder.is_none() || op_folder != s.folder {
+                // Another folder was opened meanwhile: its history and items are not this
+                // operation's (ADR 0016 §4).
+                if !errors.is_empty() {
+                    s.log.push(format!(
+                        "Some files could not be moved: {}",
+                        errors.join("; ")
+                    ));
+                }
+                return (s, fx);
+            }
+            // Requested moves that didn't happen (undo/redo): their files are still where they
+            // were, so that part of the edit stays where it was in the history.
+            let unmade: Vec<(PathBuf, PathBuf)> = requested
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| !moves.contains(m))
+                .collect();
+            let gone: std::collections::BTreeSet<PathBuf> = moves
+                .iter()
+                .map(|(from, _)| from.clone())
+                .chain(trashed.iter().cloned())
+                .collect();
+            let edit = FilesEdit {
+                moves: moves.clone(),
+            };
+            let n_items = s
+                .items
+                .iter()
+                .filter(|i| gone.contains(&i.primary.path))
+                .count();
+            match kind {
+                FileOpKind::ApplyRejects { to_trash } => {
+                    if !moves.is_empty() {
+                        s.undo.push(Edit::Files(edit));
+                        s.redo.clear();
+                    }
+                    s.remove_items(&gone, &mut fx);
+                    s.toast = Some(if to_trash {
+                        format!("Moved {n_items} rejected items to the trash")
+                    } else {
+                        format!("Moved {n_items} rejected items to _rejected/")
+                    });
+                }
+                // Handled above: a copy never runs as the file operation.
+                FileOpKind::Transfer { copy: true } => {}
+                FileOpKind::Transfer { copy: false } => {
+                    if !moves.is_empty() {
+                        s.undo.push(Edit::Files(edit));
+                        s.redo.clear();
+                    }
+                    s.remove_items(&gone, &mut fx);
+                    s.toast = Some(format!("Moved {n_items} items"));
+                }
+                FileOpKind::Redo => {
+                    if !unmade.is_empty() {
+                        s.redo.push(Edit::Files(FilesEdit { moves: unmade }));
+                    }
+                    if !moves.is_empty() {
+                        s.undo.push(Edit::Files(edit));
+                    }
+                    s.remove_items(&gone, &mut fx);
+                }
+                FileOpKind::Undo => {
+                    if !unmade.is_empty() {
+                        s.undo.push(Edit::Files(FilesEdit {
+                            moves: FilesEdit { moves: unmade }.reversed(),
+                        }));
+                    }
+                    if !moves.is_empty() {
+                        // Stored forward, so redo makes the original moves again.
+                        s.redo.push(Edit::Files(FilesEdit {
+                            moves: edit.reversed(),
+                        }));
+                    }
+                    // The files are back: list them again.
+                    if let Some(folder) = s.folder.clone() {
+                        fx.push(Effect::ScanFolder {
+                            folder,
+                            recursive: s.recursive,
+                        });
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                let msg = format!("Some files could not be moved: {}", errors.join("; "));
+                s.log.push(msg.clone());
+                s.toast = Some(msg);
+            }
+        }
     }
     (s, fx)
 }
@@ -1971,5 +2399,428 @@ mod tests {
         assert_eq!(visible_names(&s), ["a.ARW", "c.ARW"]);
         assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
         assert!(!s.meta.contains_key(Path::new("/f/b.ARW")));
+    }
+
+    #[test]
+    fn req_file_1_apply_rejects_confirms_moves_and_joins_the_undo_history() {
+        let s = opened(&["a.ARW", "a.JPG", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        assert_eq!(s.toast.as_deref(), Some("No rejected items"));
+        assert_eq!(s.confirm, None);
+        let rej = Marks {
+            rating: Some(-1),
+            label: None,
+        };
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![
+                ("/f/a.ARW".into(), rej.clone()),
+                ("/f/c.ARW".into(), rej),
+            ]),
+        );
+        // Always asks first, with the count; nothing moves until confirmed.
+        let (s, fx) = reduce(&s, Action::ApplyRejects);
+        assert!(fx.is_empty());
+        assert_eq!(
+            s.confirm,
+            Some(Confirm::ApplyRejects {
+                count: 2,
+                to_trash: false
+            })
+        );
+        let (c, _) = reduce(&s, Action::CancelDialog);
+        assert_eq!(c.confirm, None);
+        let (s, fx) = reduce(&s, Action::Confirm);
+        assert_eq!(s.confirm, None);
+        assert!(s.file_op_running);
+        assert_eq!(
+            fx,
+            [Effect::FileOp {
+                op: FileOp::Rejects {
+                    items: vec![
+                        vec![("/f/a.ARW".into(), true), ("/f/a.JPG".into(), false)],
+                        vec![("/f/c.ARW".into(), true)],
+                    ],
+                    to_trash: false,
+                },
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+            }]
+        );
+        // Undo waits for the running operation.
+        let (busy, fx) = reduce(&s, Action::Undo);
+        assert!(fx.is_empty() && busy.toast.is_some());
+        let moves = vec![
+            (
+                PathBuf::from("/f/a.ARW"),
+                PathBuf::from("/f/_rejected/a.ARW"),
+            ),
+            ("/f/a.JPG".into(), "/f/_rejected/a.JPG".into()),
+            ("/f/c.ARW".into(), "/f/_rejected/c.ARW".into()),
+        ];
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+                moves: moves.clone(),
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert!(!s.file_op_running);
+        assert_eq!(visible_names(&s), ["b.ARW"]);
+        assert_eq!(cur_name(&s).as_deref(), Some("b.ARW"));
+        assert_eq!(
+            s.toast.as_deref(),
+            Some("Moved 2 rejected items to _rejected/")
+        );
+        // Undo moves the files back (newest first) and rescans.
+        let (s, fx) = reduce(&s, Action::Undo);
+        let back: Vec<_> = moves
+            .iter()
+            .rev()
+            .map(|(a, b)| (b.clone(), a.clone()))
+            .collect();
+        assert_eq!(
+            fx,
+            [Effect::FileOp {
+                op: FileOp::Moves(back.clone()),
+                kind: FileOpKind::Undo,
+            }]
+        );
+        let (s, fx) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::Undo,
+                moves: back,
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert!(fx.contains(&Effect::ScanFolder {
+            folder: "/f".into(),
+            recursive: false
+        }));
+        // Redo makes the original moves again.
+        let (s, fx) = reduce(&s, Action::Redo);
+        assert_eq!(
+            fx,
+            [Effect::FileOp {
+                op: FileOp::Moves(moves),
+                kind: FileOpKind::Redo,
+            }]
+        );
+        assert!(s.file_op_running);
+    }
+
+    #[test]
+    fn req_file_1_trash_mode_and_errors_are_reported_and_trash_is_not_undoable() {
+        let mut s = opened(&["a.ARW", "b.ARW"]);
+        s.prefs.reject_to_trash = true;
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let undo_len = s.undo.len();
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        assert_eq!(
+            s.confirm,
+            Some(Confirm::ApplyRejects {
+                count: 1,
+                to_trash: true
+            })
+        );
+        let (s, fx) = reduce(&s, Action::Confirm);
+        assert!(matches!(
+            &fx[..],
+            [Effect::FileOp {
+                op: FileOp::Rejects { to_trash: true, .. },
+                ..
+            }]
+        ));
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: true },
+                moves: vec![],
+                trashed: vec!["/f/a.ARW".into(), "/f/a.xmp".into()],
+                errors: vec!["/f/x: busy".into()],
+            },
+        );
+        assert_eq!(visible_names(&s), ["b.ARW"]);
+        assert_eq!(s.undo.len(), undo_len, "the trash is not undoable in Blink");
+        assert!(s.toast.as_deref().unwrap().contains("/f/x: busy"));
+        assert!(s.log.iter().any(|l| l.contains("/f/x: busy")));
+    }
+
+    fn image_ready(s: &State) -> State {
+        let path = s.current_item().unwrap().primary.path.clone();
+        reduce(
+            s,
+            Action::ImageReady {
+                path,
+                level: Level::Preview,
+                source: PreviewSource::Embedded,
+                size: (10, 10),
+                full_size: (10, 10),
+            },
+        )
+        .0
+    }
+
+    #[test]
+    fn req_file_1_a_running_move_blocks_marks_and_a_moved_current_item_never_shows_stale_pixels() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        let s = image_ready(&s);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        // While the move runs, marks wait (a late write would land next to a moved file).
+        for a in [
+            Action::Mark(MarkKey::Stars(3)),
+            Action::SetRating { item: 1, rating: 2 },
+            Action::SetLabel {
+                item: 1,
+                label: Some("Red".into()),
+            },
+        ] {
+            let (b, fx) = reduce(&s, a);
+            assert!(fx.is_empty());
+            assert_eq!(b.marks, s.marks);
+        }
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+                moves: vec![("/f/b.ARW".into(), "/f/_rejected/b.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        // b's pixels, zoom request and all are gone with it.
+        assert_eq!(s.loupe.shown, None);
+        // Removing an item before the current one keeps the current item and its pixels.
+        let s = image_ready(&s);
+        let shown = s.loupe.shown.clone();
+        let (s, _) = reduce(&s, Action::Navigate(Nav::First));
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Last));
+        let s = image_ready(&s);
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+                moves: vec![("/f/a.ARW".into(), "/f/_rejected/a.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        assert_eq!(s.loupe.shown, shown);
+    }
+
+    #[test]
+    fn req_file_1_moves_an_undo_could_not_make_stay_undoable_and_other_folders_are_ignored() {
+        let s = opened(&["a.ARW", "b.ARW"]);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        let moves = vec![
+            (
+                PathBuf::from("/f/a.ARW"),
+                PathBuf::from("/f/_rejected/a.ARW"),
+            ),
+            ("/f/a.xmp".into(), "/f/_rejected/a.xmp".into()),
+        ];
+        let done = |s: &State, kind, moves: Vec<(PathBuf, PathBuf)>, errors: Vec<String>| {
+            reduce(
+                s,
+                Action::FilesMoved {
+                    kind,
+                    moves,
+                    trashed: vec![],
+                    errors,
+                },
+            )
+            .0
+        };
+        let s = done(
+            &s,
+            FileOpKind::ApplyRejects { to_trash: false },
+            moves.clone(),
+            vec![],
+        );
+        let undo_len = s.undo.len();
+        // Undo: the sidecar can't go back (a file took its name), the RAW can.
+        let (s, _) = reduce(&s, Action::Undo);
+        let s = done(
+            &s,
+            FileOpKind::Undo,
+            vec![("/f/_rejected/a.ARW".into(), "/f/a.ARW".into())],
+            vec!["/f/_rejected/a.xmp: exists".into()],
+        );
+        assert_eq!(s.undo.len(), undo_len, "the unmade part stays undoable");
+        assert_eq!(
+            s.undo.last(),
+            Some(&Edit::Files(FilesEdit {
+                moves: vec![moves[1].clone()]
+            }))
+        );
+        assert_eq!(
+            s.redo.last(),
+            Some(&Edit::Files(FilesEdit {
+                moves: vec![moves[0].clone()]
+            }))
+        );
+        // A result arriving after another folder was opened doesn't enter its history.
+        let (s, _) = reduce(&s, Action::Undo);
+        let (s, _) = reduce(&s, Action::OpenFolder("/g".into()));
+        let s = done(&s, FileOpKind::Undo, vec![moves[1].clone()], vec![]);
+        assert!(!s.file_op_running);
+        assert!(s.undo.is_empty() && s.redo.is_empty());
+    }
+
+    #[test]
+    fn req_file_2_copy_move_and_export_act_on_the_filtered_items() {
+        let s = opened(&["a.ARW", "a.JPG", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![
+                (
+                    "/f/a.ARW".into(),
+                    Marks {
+                        rating: Some(3),
+                        label: Some("Red".into()),
+                    },
+                ),
+                (
+                    "/f/c.ARW".into(),
+                    Marks {
+                        rating: Some(4),
+                        label: None,
+                    },
+                ),
+            ]),
+        );
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::RatingAtLeast(3)));
+        let (e, fx) = reduce(
+            &s,
+            Action::ExportList {
+                path: "/x/l.csv".into(),
+                csv: true,
+            },
+        );
+        assert!(!e.file_op_running);
+        // The fixture joins paths, so the separator is the platform's.
+        let f = |n: &str| Path::new("/f").join(n).display().to_string();
+        assert_eq!(
+            fx,
+            [Effect::WriteExport {
+                path: "/x/l.csv".into(),
+                contents: format!(
+                    "path,rating,label,pick\n{},3,Red,false\n{},3,Red,false\n{},4,,false\n",
+                    f("a.ARW"),
+                    f("a.JPG"),
+                    f("c.ARW")
+                ),
+            }]
+        );
+        let (e, _) = reduce(
+            &e,
+            Action::ExportWritten {
+                path: "/x/l.csv".into(),
+                error: None,
+            },
+        );
+        assert_eq!(e.toast.as_deref(), Some("Saved the item list to /x/l.csv"));
+        // Copy: the visible items only; nothing changes in the folder or the history.
+        let (c, fx) = reduce(
+            &s,
+            Action::Transfer {
+                dest: "/out".into(),
+                copy: true,
+            },
+        );
+        assert_eq!(
+            fx,
+            [Effect::FileOp {
+                op: FileOp::Transfer {
+                    items: vec![
+                        vec![("/f/a.ARW".into(), true), ("/f/a.JPG".into(), false)],
+                        vec![("/f/c.ARW".into(), true)],
+                    ],
+                    dest: "/out".into(),
+                    copy: true,
+                },
+                kind: FileOpKind::Transfer { copy: true },
+            }]
+        );
+        // While it runs, marking and rating undo keep working; moves wait for it.
+        assert_eq!(c.copies_running, 1);
+        assert!(!c.file_op_running);
+        let (r, fx) = reduce(&c, Action::SetRating { item: 0, rating: 5 });
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::WriteSidecar { .. })),
+            "a mark during a copy writes its sidecar"
+        );
+        let (r, fx) = reduce(&r, Action::Undo);
+        assert!(fx.iter().any(|e| matches!(e, Effect::WriteSidecar { .. })));
+        let (r, fx) = reduce(
+            &r,
+            Action::Transfer {
+                dest: "/out2".into(),
+                copy: false,
+            },
+        );
+        assert!(fx.is_empty());
+        assert_eq!(r.toast.as_deref(), Some("A copy is still running"));
+        let (r, fx) = reduce(
+            &r,
+            Action::Transfer {
+                dest: "/out2".into(),
+                copy: true,
+            },
+        );
+        assert_eq!((fx.len(), r.copies_running), (1, 2));
+        let (c, _) = reduce(
+            &c,
+            Action::FilesMoved {
+                kind: FileOpKind::Transfer { copy: true },
+                moves: vec![("/f/c.ARW".into(), "/out/c.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(c.items.len(), 3);
+        assert!(c.undo.is_empty());
+        assert_eq!(c.toast.as_deref(), Some("Copied 1 items"));
+        assert_eq!(c.copies_running, 0);
+        // Move: the items leave the folder and the move is undoable.
+        let (m, _) = reduce(
+            &s,
+            Action::Transfer {
+                dest: "/out".into(),
+                copy: false,
+            },
+        );
+        let (m, _) = reduce(
+            &m,
+            Action::FilesMoved {
+                kind: FileOpKind::Transfer { copy: false },
+                moves: vec![("/f/c.ARW".into(), "/out/c.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(visible_names(&m), ["a.ARW"]);
+        assert!(matches!(m.undo.last(), Some(Edit::Files(_))));
+        let (_, fx) = reduce(&m, Action::Undo);
+        assert!(matches!(
+            &fx[..],
+            [Effect::FileOp {
+                kind: FileOpKind::Undo,
+                ..
+            }]
+        ));
     }
 }

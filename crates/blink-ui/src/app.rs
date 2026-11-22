@@ -8,7 +8,7 @@ use blink_core::formats::{FileKind, Formats};
 use blink_core::preview::PreviewSource;
 use blink_core::sort::SortKey;
 use blink_core::state::{
-    Action, Effect, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
+    Action, Confirm, Effect, FileOpKind, LabelColor, Level, MarkKey, MarkPrefs, Nav, State, reduce,
 };
 use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
@@ -397,6 +397,55 @@ impl BlinkApp {
                     } => self
                         .sidecars
                         .queue(source.clone(), change.clone(), *owns_adobe_name),
+                    Effect::FileOp {
+                        op,
+                        kind: kind @ FileOpKind::Transfer { copy: true },
+                    } => {
+                        // A copy moves nothing: off the sidecar thread, so marks and their
+                        // debounced writes never wait behind gigabytes of copying (FILE-2).
+                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+                        let (op, kind) = (op.clone(), *kind);
+                        std::thread::spawn(move || {
+                            let out = blink_runtime::files::run(fs.as_ref(), &op);
+                            let _ = tx.send(Action::FilesMoved {
+                                kind,
+                                moves: out.moves,
+                                trashed: out.trashed,
+                                errors: out.errors,
+                            });
+                            ctx.request_repaint();
+                        });
+                    }
+                    Effect::FileOp { op, kind } => {
+                        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+                        let kind = *kind;
+                        // On the sidecar thread: queued writes land first, and the writer
+                        // knows the moved sidecars are its own change (FILE-1, FILE-8).
+                        self.sidecars.file_op(op.clone(), move |out| {
+                            let _ = tx.send(Action::FilesMoved {
+                                kind,
+                                moves: out.moves,
+                                trashed: out.trashed,
+                                errors: out.errors,
+                            });
+                            ctx.request_repaint();
+                        });
+                    }
+                    Effect::WriteExport { path, contents } => {
+                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+                        let (path, contents) = (path.clone(), contents.clone());
+                        std::thread::spawn(move || {
+                            let error = blink_runtime::atomic::write_export(
+                                fs.as_ref(),
+                                &path,
+                                contents.as_bytes(),
+                            )
+                            .err()
+                            .map(|e| e.to_string());
+                            let _ = tx.send(Action::ExportWritten { path, error });
+                            ctx.request_repaint();
+                        });
+                    }
                     Effect::Show { .. } | Effect::LoadFull { .. } => {
                         queue.extend(self.loader.execute(&e));
                     }
@@ -485,11 +534,52 @@ impl BlinkApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(LOUPE_BG))
             .show(ui, |ui| self.loupe(ui));
+        self.dialog(ui.ctx());
+    }
+
+    /// The open confirmation dialog (SPEC §5.1).
+    fn dialog(&mut self, ctx: &egui::Context) {
+        let Some(Confirm::ApplyRejects { count, to_trash }) = self.state.confirm.clone() else {
+            return;
+        };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("apply-rejects")).show(ctx, |ui| {
+            ui.heading("Apply rejects");
+            let s = if count == 1 { "" } else { "s" };
+            ui.label(if to_trash {
+                format!("Move {count} rejected item{s} to the trash?")
+            } else {
+                format!("Move {count} rejected item{s} to _rejected/?")
+            });
+            ui.label("Every file of each item and its sidecars move together. Nothing is deleted.");
+            ui.horizontal(|ui| {
+                if ui.button("Move").clicked() {
+                    answer = Some(Action::Confirm);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(Action::CancelDialog);
+                }
+            });
+        });
+        if let Some(a) = answer {
+            self.dispatch(a);
+        }
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // Typing into a text field (the filter expression) is not a shortcut.
         if ctx.text_edit_focused() {
+            return;
+        }
+        if self.state.confirm.is_some() {
+            // A dialog is open: only its keys work.
+            let (enter, esc) =
+                ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+            if enter {
+                self.dispatch(Action::Confirm);
+            } else if esc {
+                self.dispatch(Action::CancelDialog);
+            }
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -512,6 +602,9 @@ impl BlinkApp {
             let mark = |k| (!repeat).then_some(Action::Mark(k));
             let a = match key {
                 // Undo / redo (RATE-3), `Cmd` on macOS.
+                // Apply rejects (FILE-1); always asks first.
+                // (`Backspace` too: Mac keyboards often lack forward delete.)
+                Key::Delete | Key::Backspace if m.command && m.shift => Some(Action::ApplyRejects),
                 Key::Z if m.command && m.shift => Some(Action::Redo),
                 Key::Z if m.command => Some(Action::Undo),
                 // Stars, labels (RATE-1); `Shift+9` is purple whatever the layout makes of it.
@@ -597,6 +690,41 @@ impl BlinkApp {
                 if ui.button("Open…").clicked() {
                     open = true;
                 }
+                if ui
+                    .button("Apply rejects…")
+                    .on_hover_text("Move rejected items away (Ctrl+Shift+Delete)")
+                    .clicked()
+                {
+                    actions.push(Action::ApplyRejects);
+                }
+                ui.menu_button("Files", |ui| {
+                    for (text, copy) in [
+                        ("Copy filtered items to…", true),
+                        ("Move filtered items to…", false),
+                    ] {
+                        if ui.button(text).clicked() {
+                            ui.close();
+                            if let Some(dest) = rfd::FileDialog::new().pick_folder() {
+                                actions.push(Action::Transfer { dest, copy });
+                            }
+                        }
+                    }
+                    for (text, ext, csv) in [
+                        ("Export list as .txt…", "txt", false),
+                        ("Export list as .csv…", "csv", true),
+                    ] {
+                        if ui.button(text).clicked() {
+                            ui.close();
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter(ext, &[ext])
+                                .set_file_name(format!("blink-items.{ext}"))
+                                .save_file()
+                            {
+                                actions.push(Action::ExportList { path, csv });
+                            }
+                        }
+                    }
+                });
                 let folder = self
                     .state
                     .folder

@@ -316,6 +316,32 @@ impl<'a> SidecarWriter<'a> {
         })
     }
 
+    /// Blink moved (or, with `to == None`, trashed) these files (FILE-1). Sidecars among them
+    /// keep their session state under the new name: the baseline an undo restores, and the bytes
+    /// Blink last wrote, so the watcher sees the move as Blink's own change, not another app's.
+    pub fn moved(&mut self, moves: &[(PathBuf, Option<PathBuf>)]) {
+        for (from, to) in moves {
+            if !crate::atomic::is_sidecar_path(from) {
+                continue;
+            }
+            let held = match self.last_written.remove(from) {
+                Some(b) => b,
+                None => to
+                    .as_ref()
+                    .and_then(|t| read_opt(self.fs, t).ok().flatten()),
+            };
+            let base = self.baseline.remove(from);
+            // Blink made `from` absent.
+            self.last_written.insert(from.clone(), None);
+            if let Some(to) = to {
+                self.last_written.insert(to.clone(), held);
+                if let Some(b) = base {
+                    self.baseline.insert(to.clone(), b);
+                }
+            }
+        }
+    }
+
     /// External changes the writer found when it was about to write (FILE-8); the GUI handles
     /// them like watcher events.
     pub fn take_external(&mut self) -> Vec<ExternalChange> {
@@ -462,6 +488,11 @@ enum Msg {
     Watch(Option<(PathBuf, bool)>),
     /// Paths a watcher reported.
     Changed(Vec<PathBuf>),
+    /// Run a file operation after writing everything queued (FILE-1), then report it.
+    FileOp(
+        blink_core::state::FileOp,
+        Box<dyn FnOnce(crate::files::Outcome) + Send>,
+    ),
     /// Write what is queued and stop (the thread holds a sender for its watcher, so the channel
     /// alone never disconnects).
     Shutdown,
@@ -541,6 +572,26 @@ impl SidecarService {
                             watcher =
                                 target.and_then(|(dir, rec)| watch(&dir, rec, watch_tx.clone()));
                         }
+                        Some(Msg::FileOp(op, done)) => {
+                            // Queued writes land before their files move; the moves are
+                            // recorded before any watcher event for them is handled.
+                            report(&mut w, true);
+                            let out = crate::files::run(fs.as_ref(), &op);
+                            // Copies leave the originals where they are.
+                            let copied = matches!(
+                                op,
+                                blink_core::state::FileOp::Transfer { copy: true, .. }
+                            );
+                            let moved: Vec<(PathBuf, Option<PathBuf>)> = out
+                                .moves
+                                .iter()
+                                .map(|(a, b)| (a.clone(), Some(b.clone())))
+                                .chain(out.trashed.iter().map(|a| (a.clone(), None)))
+                                .filter(|_| !copied)
+                                .collect();
+                            w.moved(&moved);
+                            done(out);
+                        }
                         Some(Msg::Changed(paths)) => {
                             for p in paths {
                                 if let Some(c) = w.external_change(&p) {
@@ -577,6 +628,16 @@ impl SidecarService {
     /// previous watch.
     pub fn watch(&self, folder: PathBuf, recursive: bool) {
         self.send(Msg::Watch(Some((folder, recursive))));
+    }
+
+    /// Run a file operation on the sidecar thread (FILE-1): queued sidecar writes first, then
+    /// the moves; `done` gets the outcome on that thread.
+    pub fn file_op(
+        &self,
+        op: blink_core::state::FileOp,
+        done: impl FnOnce(crate::files::Outcome) + Send + 'static,
+    ) {
+        self.send(Msg::FileOp(op, Box::new(done)));
     }
 
     /// Report that `paths` changed, as a watcher would (tests; file systems without events).
