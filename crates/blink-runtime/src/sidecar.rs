@@ -488,6 +488,8 @@ enum Msg {
     Watch(Option<(PathBuf, bool)>),
     /// Paths a watcher reported.
     Changed(Vec<PathBuf>),
+    /// Files other than sidecars were added, removed or renamed (OPEN-3).
+    FolderChanged,
     /// Run a file operation after writing everything queued (FILE-1), then report it.
     FileOp(
         blink_core::state::FileOp,
@@ -503,6 +505,9 @@ enum Msg {
 pub enum SidecarEvent {
     Written(WriteReport),
     External(ExternalChange),
+    /// A file that isn't a sidecar appeared, disappeared or was renamed in the watched folder
+    /// (OPEN-3): the listing should be rescanned. Bursts are not coalesced here.
+    FolderChanged,
 }
 
 /// The GUI's sidecar writer: a [`SidecarWriter`] on its own I/O thread (SPEC §8.3), so the UI
@@ -599,6 +604,7 @@ impl SidecarService {
                                 }
                             }
                         }
+                        Some(Msg::FolderChanged) => on_event(SidecarEvent::FolderChanged),
                         Some(Msg::Shutdown) | None => {
                             drop(watcher.take());
                             report(&mut w, true);
@@ -640,6 +646,11 @@ impl SidecarService {
         self.send(Msg::FileOp(op, Box::new(done)));
     }
 
+    /// Report that the folder listing changed, as a watcher would (tests).
+    pub fn folder_changed(&self) {
+        self.send(Msg::FolderChanged);
+    }
+
     /// Report that `paths` changed, as a watcher would (tests; file systems without events).
     pub fn changed(&self, paths: Vec<PathBuf>) {
         self.send(Msg::Changed(paths));
@@ -661,6 +672,11 @@ impl SidecarService {
             let _ = done_rx.recv();
         }
     }
+}
+
+fn hidden(p: &Path) -> bool {
+    p.file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with('.'))
 }
 
 /// A notify watcher that forwards sidecar paths to the service thread. `None` if the folder
@@ -685,14 +701,19 @@ fn watch(
         if let Ok(ev) = res
             && !matches!(ev.kind, notify::EventKind::Access(_))
         {
-            let paths: Vec<PathBuf> = ev
+            let (paths, others): (Vec<PathBuf>, Vec<PathBuf>) = ev
                 .paths
                 .into_iter()
-                .filter(|p| crate::atomic::is_sidecar_path(p))
-                .map(&map)
-                .collect();
+                .partition(|p| crate::atomic::is_sidecar_path(p));
+            let paths: Vec<PathBuf> = paths.into_iter().map(&map).collect();
             if !paths.is_empty() {
                 let _ = tx.send(Msg::Changed(paths));
+            }
+            // Content writes count too: a file listed while still being copied in has its
+            // capture metadata read again. Hidden names (temp files, Blink's included) are
+            // never listed.
+            if others.iter().any(|p| !hidden(p)) {
+                let _ = tx.send(Msg::FolderChanged);
             }
         }
     })

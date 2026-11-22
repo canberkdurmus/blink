@@ -16,6 +16,10 @@ pub fn configured_options() -> Options {
     let (c, errs) = blink_runtime::config::Config::load(&fs, &paths.config_dir);
     Options {
         sidecar_style: c.sidecar_style,
+        external_apps: c.external_apps(),
+        cache_bytes: c
+            .cache_bytes
+            .unwrap_or(blink_runtime::loader::DEFAULT_CACHE_BYTES),
         marks: c.marks,
         notice: (!errs.is_empty()).then(|| errs.join("; ")),
         ..Options::default()

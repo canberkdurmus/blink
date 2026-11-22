@@ -3,8 +3,10 @@
 //! clipping overlay and histogram (VIEW-6) and the info panel (VIEW-7).
 
 use crate::tiles::{self, Prepared, Tile};
+use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::filter::{Cond, Filter};
 use blink_core::formats::{FileKind, Formats};
+use blink_core::item::Item;
 use blink_core::preview::PreviewSource;
 use blink_core::sort::SortKey;
 use blink_core::state::{
@@ -12,6 +14,7 @@ use blink_core::state::{
 };
 use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
+use blink_runtime::external::{Launcher, ProcessLauncher};
 use blink_runtime::fs::Fs;
 use blink_runtime::loader::{DEFAULT_CACHE_BYTES, Loaded, Loader, default_workers};
 use blink_runtime::sidecar::{SidecarEvent, SidecarService, SidecarStyle, SystemClock};
@@ -20,6 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 /// Loupe background: neutral dark grey, no tint (SPEC §5.1).
 pub const LOUPE_BG: Color32 = Color32::from_gray(24);
@@ -87,6 +91,9 @@ struct Uploaded {
     total: usize,
 }
 
+/// Quiet time after a folder change before the rescan (OPEN-3: changes show within 1 s).
+const RESCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Construction options.
 pub struct Options {
     pub fs: Arc<dyn Fs>,
@@ -99,6 +106,10 @@ pub struct Options {
     pub marks: MarkPrefs,
     /// Shown in the toast area at start (e.g. problems in the config file).
     pub notice: Option<String>,
+    /// The "Open in" list (FILE-3); `Ctrl+Shift+E` uses the first.
+    pub external_apps: Vec<ExternalApp>,
+    /// Starts external apps (a recorder in tests).
+    pub launcher: Arc<dyn Launcher>,
 }
 
 impl Default for Options {
@@ -111,6 +122,8 @@ impl Default for Options {
             sidecar_style: SidecarStyle::default(),
             marks: MarkPrefs::default(),
             notice: None,
+            external_apps: default_apps(TargetOs::current()),
+            launcher: Arc::new(ProcessLauncher),
         }
     }
 }
@@ -157,7 +170,17 @@ pub struct BlinkApp {
     filter_error: Option<String>,
     /// A scan finished; read capture metadata once the first image is on screen, so it never
     /// competes with it (PERF-1).
-    meta_wanted: bool,
+    meta_wanted: Vec<Item>,
+    /// The folder the sidecar service watches (FILE-8, OPEN-3).
+    watching: Option<(PathBuf, bool)>,
+    /// A folder change was reported; rescan at this time (debounced bursts, OPEN-3).
+    rescan_at: Option<Instant>,
+    /// Scans running, by folder and mode; `true`: run it again when it returns.
+    scans: HashMap<(PathBuf, bool), bool>,
+    /// Decode cache cap (PERF-8).
+    cache_cap: usize,
+    external_apps: Vec<ExternalApp>,
+    launcher: Arc<dyn Launcher>,
 }
 
 impl BlinkApp {
@@ -207,6 +230,7 @@ impl BlinkApp {
                             return;
                         }
                     },
+                    SidecarEvent::FolderChanged => Action::FolderChanged,
                     SidecarEvent::External(c) => {
                         if c.conflict() {
                             eprintln!(
@@ -229,6 +253,8 @@ impl BlinkApp {
         let mut state = State::new(Formats::new(opts.backend.extensions()));
         state.prefs = opts.marks;
         state.toast = opts.notice;
+        let (external_apps, launcher) = (opts.external_apps, opts.launcher);
+        let cache_cap = opts.cache_bytes;
         let mut app = Self {
             state,
             fs: opts.fs,
@@ -254,7 +280,13 @@ impl BlinkApp {
             loupe_rect: None,
             filter_text: String::new(),
             filter_error: None,
-            meta_wanted: false,
+            external_apps,
+            launcher,
+            meta_wanted: Vec::new(),
+            watching: None,
+            rescan_at: None,
+            scans: HashMap::new(),
+            cache_cap,
         };
         if let Some(f) = folder {
             app.open_path(&f);
@@ -314,6 +346,16 @@ impl BlinkApp {
         self.sidecars.changed(paths);
     }
 
+    /// Bytes the decode cache holds now, and its cap (PERF-8).
+    pub fn cache_usage(&self) -> (usize, usize) {
+        (self.loader.cache_bytes(), self.cache_cap)
+    }
+
+    /// Report that the folder listing changed, as the watcher would (OPEN-3; tests).
+    pub fn folder_changed(&self) {
+        self.sidecars.folder_changed();
+    }
+
     /// No decode job is queued or running.
     pub fn loader_idle(&self) -> bool {
         self.loader.idle()
@@ -339,6 +381,27 @@ impl BlinkApp {
         let mut queue = VecDeque::from([action]);
         while let Some(a) = queue.pop_front() {
             let scanned = matches!(a, Action::FolderScanned { .. });
+            // Scans of one folder and mode run one at a time, so an older listing can never
+            // land after a newer one; a scan asked for meanwhile runs when it returns.
+            let rescan = match &a {
+                Action::FolderScanned {
+                    folder, recursive, ..
+                } => self
+                    .scans
+                    .remove(&(folder.clone(), *recursive))
+                    .filter(|&pending| pending)
+                    .map(|_| (folder.clone(), *recursive)),
+                _ => None,
+            };
+            let known: std::collections::HashSet<PathBuf> = if scanned {
+                self.state
+                    .items
+                    .iter()
+                    .map(|i| i.primary.path.clone())
+                    .collect()
+            } else {
+                Default::default()
+            };
             if matches!(a, Action::OpenFolder(_)) {
                 // Files may have changed on disk: never reuse an old texture for a path.
                 self.textures.clear();
@@ -349,6 +412,9 @@ impl BlinkApp {
                 self.l1_order.clear();
                 self.drawn = None;
                 self.loader.clear();
+                // Opening again re-creates the watch (the folder may have been replaced, or
+                // the last watch failed).
+                self.watching = None;
             }
             let (s, fx) = reduce(&self.state, a);
             let toast_changed = s.toast != self.state.toast;
@@ -357,20 +423,55 @@ impl BlinkApp {
                 self.toast_at = self.ctx.input(|i| i.time);
             }
             if scanned {
-                self.load_marks();
-                self.meta_wanted = true;
+                // A rescan (OPEN-3, undo of a move) reads only the items it added.
+                let fresh: Vec<Item> = self
+                    .state
+                    .items
+                    .iter()
+                    .filter(|i| !known.contains(&i.primary.path))
+                    .cloned()
+                    .collect();
+                if !fresh.is_empty() {
+                    self.load_marks(fresh);
+                }
+                // Capture metadata for new items, and again for any whose read gave nothing
+                // (a file still being copied in when it was first listed).
+                let pending: std::collections::HashSet<PathBuf> = self
+                    .meta_wanted
+                    .iter()
+                    .map(|i| i.primary.path.clone())
+                    .collect();
+                let missing: Vec<Item> = self
+                    .state
+                    .items
+                    .iter()
+                    .filter(|i| {
+                        !self.state.meta.contains_key(&i.primary.path)
+                            && !pending.contains(&i.primary.path)
+                    })
+                    .cloned()
+                    .collect();
+                self.meta_wanted.extend(missing);
             }
-            if self.meta_wanted
+            if let Some((folder, recursive)) = rescan {
+                self.start_scan(folder, recursive);
+            }
+            if !self.meta_wanted.is_empty()
                 && (self.state.loupe.shown.is_some() || self.state.current.is_none())
             {
-                self.meta_wanted = false;
-                self.load_meta();
+                let items = std::mem::take(&mut self.meta_wanted);
+                self.load_meta(items);
             }
             for e in fx {
                 match &e {
                     Effect::ScanFolder { folder, recursive } => {
-                        self.sidecars.watch(folder.clone(), *recursive);
-                        self.scan(folder.clone(), *recursive)
+                        // A rescan keeps the running watch: a new one could miss events.
+                        let target = Some((folder.clone(), *recursive));
+                        if self.watching != target {
+                            self.sidecars.watch(folder.clone(), *recursive);
+                            self.watching = target;
+                        }
+                        self.start_scan(folder.clone(), *recursive)
                     }
                     Effect::ReloadMarks {
                         item,
@@ -454,6 +555,42 @@ impl BlinkApp {
         }
     }
 
+    /// Open the current item's primary file in external app `index` (FILE-3). Resolving the
+    /// program reads the file system, so it runs off the UI thread (PERF-9).
+    pub fn open_external(&mut self, index: usize) {
+        let (Some(app), Some(item)) = (self.external_apps.get(index), self.state.current_item())
+        else {
+            return;
+        };
+        let (app, file) = (app.clone(), item.primary.path.clone());
+        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+        let launcher = self.launcher.clone();
+        std::thread::spawn(move || {
+            let error = match blink_runtime::external::command(fs.as_ref(), &app, &file) {
+                None => Some("program not found".to_string()),
+                Some(cmd) => launcher.launch(&cmd).err().map(|e| e.to_string()),
+            };
+            let _ = tx.send(Action::ExternalAppLaunched {
+                app: app.name,
+                error,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Scan unless the same scan is running; then run it again once that one returns.
+    fn start_scan(&mut self, folder: PathBuf, recursive: bool) {
+        match self.scans.entry((folder.clone(), recursive)) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.insert(true);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(false);
+                self.scan(folder, recursive);
+            }
+        }
+    }
+
     fn scan(&self, folder: PathBuf, recursive: bool) {
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
@@ -468,9 +605,8 @@ impl BlinkApp {
         });
     }
 
-    fn load_marks(&self) {
+    fn load_marks(&self, items: Vec<Item>) {
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
-        let items = self.state.items.clone();
         std::thread::spawn(move || {
             let m = blink_runtime::marks::load_marks(fs.as_ref(), &items);
             let _ = tx.send(Action::MarksLoaded(m));
@@ -480,10 +616,9 @@ impl BlinkApp {
 
     /// Capture metadata for filters and the capture-time sort (FILT-1/2), in chunks so the
     /// first items sort before the whole folder is read.
-    fn load_meta(&self) {
+    fn load_meta(&self, items: Vec<Item>) {
         const CHUNK: usize = 256;
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
-        let items = self.state.items.clone();
         let busy = self.loader.busy_probe();
         std::thread::spawn(move || {
             for chunk in items.chunks(CHUNK) {
@@ -501,7 +636,23 @@ impl BlinkApp {
         let mut incoming: Vec<Action> = self.rx.try_iter().collect();
         incoming.extend(self.loader.poll());
         for a in incoming {
+            if matches!(a, Action::FolderChanged) {
+                // A copy into the folder reports many events: one rescan for a burst, timed
+                // from its first event so a long copy still shows within 1 s.
+                self.rescan_at
+                    .get_or_insert_with(|| Instant::now() + RESCAN_DEBOUNCE);
+                continue;
+            }
             self.dispatch(a);
+        }
+        if let Some(at) = self.rescan_at {
+            let now = Instant::now();
+            if now >= at {
+                self.rescan_at = None;
+                self.dispatch(Action::FolderChanged);
+            } else {
+                self.ctx.request_repaint_after(at - now);
+            }
         }
     }
 
@@ -585,6 +736,7 @@ impl BlinkApp {
         let events = ctx.input(|i| i.events.clone());
         let mut actions = Vec::new();
         let mut open = false;
+        let mut external = false;
         let pointer = self.pointer_in_loupe(ctx);
         for ev in events {
             let egui::Event::Key {
@@ -606,6 +758,11 @@ impl BlinkApp {
                 // (`Backspace` too: Mac keyboards often lack forward delete.)
                 Key::Delete | Key::Backspace if m.command && m.shift => Some(Action::ApplyRejects),
                 Key::Z if m.command && m.shift => Some(Action::Redo),
+                // Open in the first external app (FILE-3, SPEC §5.2).
+                Key::E if m.command && m.shift && !repeat => {
+                    external = true;
+                    None
+                }
                 Key::Z if m.command => Some(Action::Undo),
                 // Stars, labels (RATE-1); `Shift+9` is purple whatever the layout makes of it.
                 _ if plain && m.shift && digit == Key::Num9 => {
@@ -655,6 +812,9 @@ impl BlinkApp {
         for a in actions {
             self.dispatch(a);
         }
+        if external {
+            self.open_external(0);
+        }
         if open {
             self.open_dialog();
         }
@@ -696,6 +856,27 @@ impl BlinkApp {
                     .clicked()
                 {
                     actions.push(Action::ApplyRejects);
+                }
+                let mut external = None;
+                ui.menu_button("Open in", |ui| {
+                    for (i, a) in self.external_apps.iter().enumerate() {
+                        let b = ui.add_enabled(
+                            self.state.current_item().is_some(),
+                            egui::Button::new(&a.name),
+                        );
+                        let b = if i == 0 {
+                            b.on_hover_text("Ctrl+Shift+E")
+                        } else {
+                            b
+                        };
+                        if b.clicked() {
+                            ui.close();
+                            external = Some(i);
+                        }
+                    }
+                });
+                if let Some(i) = external {
+                    self.open_external(i);
                 }
                 ui.menu_button("Files", |ui| {
                     for (text, copy) in [

@@ -4,6 +4,7 @@
 
 pub mod atomic;
 pub mod config;
+pub mod external;
 pub mod files;
 pub mod fs;
 pub mod inspect;

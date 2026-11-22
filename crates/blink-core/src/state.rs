@@ -703,6 +703,9 @@ pub enum Action {
     },
     /// Marks read from sidecars or embedded XMP (RATE-4), keyed by primary path.
     MarksLoaded(Vec<(PathBuf, Marks)>),
+    /// Files in the open folder were added, removed or renamed by another program (OPEN-3):
+    /// rescan it.
+    FolderChanged,
     /// Set the star rating (−1…5) of an item; applies to every member (OPEN-2).
     SetRating {
         item: usize,
@@ -791,6 +794,11 @@ pub enum Action {
     ExportList {
         path: PathBuf,
         csv: bool,
+    },
+    /// An external app was started on an item, or couldn't be (FILE-3).
+    ExternalAppLaunched {
+        app: String,
+        error: Option<String>,
     },
     /// Result of [`Effect::WriteExport`].
     ExportWritten {
@@ -984,14 +992,29 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             // Drop stale results (another folder or mode was requested meanwhile).
             if s.folder.as_ref() == Some(&folder) && s.recursive == recursive {
                 let keep = s.current_item().map(|i| i.primary.path.clone());
+                // If the current item is gone, the next one still there (then the previous),
+                // as when rejects move away (OPEN-3).
+                let p = s.pos().unwrap_or(0).min(s.visible.len());
+                let order: Vec<PathBuf> = s.visible[p..]
+                    .iter()
+                    .chain(s.visible[..p].iter().rev())
+                    .map(|&i| s.items[i].primary.path.clone())
+                    .collect();
                 s.items = build_items(&files, &s.formats);
                 let listed: std::collections::BTreeSet<PathBuf> =
                     s.items.iter().map(|i| i.primary.path.clone()).collect();
                 s.meta.retain(|p, _| listed.contains(p));
                 s.visible = s.compute_visible();
+                let find = |s: &State, p: &PathBuf| {
+                    s.items
+                        .iter()
+                        .position(|i| &i.primary.path == p)
+                        .filter(|c| s.visible.contains(c))
+                };
                 s.current = keep
-                    .and_then(|p| s.items.iter().position(|i| i.primary.path == p))
-                    .filter(|c| s.visible.contains(c))
+                    .iter()
+                    .chain(order.iter())
+                    .find_map(|p| find(&s, p))
                     .or(s.visible.first().copied());
                 if s.loupe.shown.as_ref().map(|x| &x.path)
                     != s.current_item().map(|i| &i.primary.path)
@@ -1000,6 +1023,14 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     s.loupe.pending_full = false;
                 }
                 fx.extend(s.show_effect());
+            }
+        }
+        Action::FolderChanged => {
+            if let Some(folder) = s.folder.clone() {
+                fx.push(Effect::ScanFolder {
+                    folder,
+                    recursive: s.recursive,
+                });
             }
         }
         Action::Navigate(nav) => {
@@ -1326,6 +1357,15 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 crate::export::item_list(s.visible_items(), &s.marks, s.prefs.pick_value, csv);
             fx.push(Effect::WriteExport { path, contents });
         }
+        Action::ExternalAppLaunched { app, error } => {
+            s.toast = Some(match error {
+                None => format!("Opened in {app}"),
+                Some(e) => {
+                    s.log.push(format!("Could not open in {app}: {e}"));
+                    format!("Could not open in {app}: {e}")
+                }
+            });
+        }
         Action::ExportWritten { path, error } => {
             let name = path.display();
             s.toast = Some(match error {
@@ -1497,6 +1537,76 @@ mod tests {
             },
         )
         .0
+    }
+
+    #[test]
+    fn req_open_3_a_folder_change_rescans_and_the_listing_adds_removes_and_renames_items() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW", "d.ARW"]);
+        assert!(
+            reduce(&State::new(Formats::new(["arw"])), Action::FolderChanged)
+                .1
+                .is_empty()
+        );
+        let (s, fx) = reduce(&s, Action::FolderChanged);
+        assert_eq!(
+            fx,
+            [Effect::ScanFolder {
+                folder: "/f".into(),
+                recursive: false
+            }]
+        );
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        assert_eq!(
+            s.current_item().unwrap().primary.path,
+            Path::new("/f").join("c.ARW")
+        );
+        let rescan = |s: &State, names: &[&str]| {
+            reduce(
+                s,
+                Action::FolderScanned {
+                    folder: "/f".into(),
+                    recursive: false,
+                    files: scanned("/f", names),
+                },
+            )
+            .0
+        };
+        // Added: listed, the current item stays.
+        let s = rescan(&s, &["a.ARW", "b.ARW", "c.ARW", "d.ARW", "e.ARW"]);
+        assert_eq!(s.items.len(), 5);
+        assert_eq!(
+            s.current_item().unwrap().primary.path,
+            Path::new("/f").join("c.ARW")
+        );
+        // Removed: the current item's next neighbour takes its place.
+        let s = rescan(&s, &["a.ARW", "b.ARW", "d.ARW", "e.ARW"]);
+        assert_eq!(s.items.len(), 4);
+        assert_eq!(
+            s.current_item().unwrap().primary.path,
+            Path::new("/f").join("d.ARW")
+        );
+        // Renamed: the old name leaves, the new one is listed.
+        let s = rescan(&s, &["a.ARW", "b.ARW", "d.ARW", "z.ARW"]);
+        let names: Vec<_> = s
+            .items
+            .iter()
+            .map(|i| {
+                i.primary
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["a.ARW", "b.ARW", "d.ARW", "z.ARW"]);
+        // The last items gone: the previous one remains.
+        let s = rescan(&s, &["a.ARW"]);
+        assert_eq!(
+            s.current_item().unwrap().primary.path,
+            Path::new("/f").join("a.ARW")
+        );
     }
 
     #[test]
@@ -2678,6 +2788,35 @@ mod tests {
         let s = done(&s, FileOpKind::Undo, vec![moves[1].clone()], vec![]);
         assert!(!s.file_op_running);
         assert!(s.undo.is_empty() && s.redo.is_empty());
+    }
+
+    #[test]
+    fn req_file_3_launch_results_show_in_the_toast_and_failures_are_logged() {
+        let s = opened(&["a.ARW"]);
+        let (s, fx) = reduce(
+            &s,
+            Action::ExternalAppLaunched {
+                app: "GIMP".into(),
+                error: None,
+            },
+        );
+        assert!(fx.is_empty());
+        assert_eq!(s.toast.as_deref(), Some("Opened in GIMP"));
+        let (s, _) = reduce(
+            &s,
+            Action::ExternalAppLaunched {
+                app: "GIMP".into(),
+                error: Some("not found".into()),
+            },
+        );
+        assert_eq!(
+            s.toast.as_deref(),
+            Some("Could not open in GIMP: not found")
+        );
+        assert_eq!(
+            s.log.last().map(String::as_str),
+            Some("Could not open in GIMP: not found")
+        );
     }
 
     #[test]
