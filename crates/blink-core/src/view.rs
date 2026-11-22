@@ -367,3 +367,41 @@ mod tests {
         assert!(prefetch_window(0, 1, Forward).is_empty());
     }
 }
+
+/// Loupe or grid (VIEW-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Loupe,
+    Grid,
+}
+
+/// Grid cell size (VIEW-5: three sizes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThumbSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl ThumbSize {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+
+    /// Long edge of a cell's image area, in points.
+    pub fn cell(self) -> f32 {
+        match self {
+            Self::Small => 96.0,
+            Self::Medium => 160.0,
+            Self::Large => 288.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "S",
+            Self::Medium => "M",
+            Self::Large => "L",
+        }
+    }
+}

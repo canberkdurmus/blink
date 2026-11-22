@@ -51,6 +51,16 @@ mod full_perf {
     }
 
     #[test]
+    fn req_perf_6_grid_of_2000_thumbnails_cold() {
+        let r = bench(
+            "perf-6-grid.json",
+            &blink_testkit::fixtures::perf_folder(2000),
+        );
+        assert_eq!(r.metrics.len(), 2);
+        assert_eq!(r.metrics[0].runs_ms.len(), 3);
+    }
+
+    #[test]
     fn req_perf_2_next_item_prefetched_is_drawn_at_once() {
         let r = bench(
             "perf-2-next.json",

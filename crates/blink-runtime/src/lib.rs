@@ -14,6 +14,7 @@ pub mod meta;
 pub mod paths;
 pub mod scan;
 pub mod sidecar;
+pub mod thumbs;
 
 /// Version string shared by the GUI and CLI.
 pub fn version() -> &'static str {

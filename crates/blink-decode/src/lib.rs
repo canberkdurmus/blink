@@ -9,6 +9,7 @@ pub mod image;
 mod pjpeg;
 pub mod raw;
 pub mod stats;
+pub mod thumb;
 pub mod tiff;
 
 use blink_core::formats::FileKind;
