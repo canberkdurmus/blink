@@ -177,6 +177,8 @@ pub struct BlinkApp {
     rescan_at: Option<Instant>,
     /// Scans running, by folder and mode; `true`: run it again when it returns.
     scans: HashMap<(PathBuf, bool), bool>,
+    /// Bumped by every [`BlinkApp::open_path`]: only the latest one opens (PERF-9).
+    open_seq: Arc<std::sync::Mutex<u64>>,
     /// Decode cache cap (PERF-8).
     cache_cap: usize,
     external_apps: Vec<ExternalApp>,
@@ -286,6 +288,7 @@ impl BlinkApp {
             watching: None,
             rescan_at: None,
             scans: HashMap::new(),
+            open_seq: Default::default(),
             cache_cap,
         };
         if let Some(f) = folder {
@@ -362,18 +365,44 @@ impl BlinkApp {
     }
 
     /// Open a folder, or the folder of a file (command line, drop, dialog — OPEN-1).
+    ///
+    /// Telling a folder from a file reads the file system, so it runs off the UI thread (PERF-9:
+    /// a network share may take seconds); the folder opens when the answer comes back, unless a
+    /// later `open_path` came first.
     pub fn open_path(&mut self, p: &Path) {
-        let is_dir = self.fs.metadata(p).map(|m| m.is_dir).unwrap_or(false);
-        let folder = if is_dir {
-            p.to_path_buf()
-        } else {
-            // A bare file name has the parent "": that is the current folder.
-            p.parent()
-                .filter(|q| !q.as_os_str().is_empty())
-                .unwrap_or(Path::new("."))
-                .to_path_buf()
-        };
-        self.dispatch(Action::OpenFolder(folder));
+        let seq = self.next_open();
+        let (fs, tx, ctx, latest) = (
+            self.fs.clone(),
+            self.tx.clone(),
+            self.ctx.clone(),
+            self.open_seq.clone(),
+        );
+        let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let is_dir = fs.metadata(&p).map(|m| m.is_dir).unwrap_or(false);
+            let folder = if is_dir {
+                p
+            } else {
+                // A bare file name has the parent "": that is the current folder.
+                p.parent()
+                    .filter(|q| !q.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf()
+            };
+            // Compare and send under the lock: a newer open can't slip in between.
+            let latest = latest.lock().unwrap_or_else(|e| e.into_inner());
+            if *latest == seq {
+                let _ = tx.send(Action::OpenFolder(folder));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Start a new open: any open still resolving in the background is dropped.
+    fn next_open(&self) -> u64 {
+        let mut s = self.open_seq.lock().unwrap_or_else(|e| e.into_inner());
+        *s += 1;
+        *s
     }
 
     /// Run an action through the reducer and execute its effects.
@@ -403,6 +432,8 @@ impl BlinkApp {
                 Default::default()
             };
             if matches!(a, Action::OpenFolder(_)) {
+                // This open wins over any `open_path` still resolving in the background.
+                self.next_open();
                 // Files may have changed on disk: never reuse an old texture for a path.
                 self.textures.clear();
                 self.overlay_textures.clear();

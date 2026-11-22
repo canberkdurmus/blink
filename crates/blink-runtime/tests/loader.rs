@@ -414,3 +414,55 @@ fn req_view_1_a_load_in_flight_during_clear_never_fills_the_cache() {
         .expect("loaded");
     assert_eq!((l.preview.image.width, l.preview.image.height), (80, 60));
 }
+
+/// PERF-9: on slow storage the prefetch window shrinks to what the measured reads can bring in
+/// within the loader's horizon, so the device is not kept busy with items the user may never
+/// reach; reads stay on the loader's threads.
+#[test]
+fn req_perf_9_slow_reads_shrink_the_prefetch_window_to_the_measured_throughput() {
+    use blink_runtime::fs::{FsCall, SlowFs};
+    let mem = MemFs::new();
+    for n in 0..20 {
+        mem.add_file(format!("/f/{n}.ARW"), low_res_raw());
+    }
+    // 0.85–1 s per read, two workers: 2–2.4 items/s, 4 in the 2 s horizon (sleeps only overshoot).
+    let fs = Arc::new(SlowFs::new(Arc::new(mem), Duration::from_millis(850)));
+    let loader: Loader<()> = Loader::new(fs.clone(), Arc::new(FakeRaw), 2, 1 << 30, |_| (), || {});
+    let item = |n: usize| blink_core::state::ItemRef {
+        path: format!("/f/{n}.ARW").into(),
+        kind: blink_core::formats::FileKind::Raw,
+        paired_jpeg: None,
+    };
+    let wait_idle = || {
+        let t = std::time::Instant::now();
+        while !loader.idle() {
+            assert!(t.elapsed() < Duration::from_secs(30), "loader never idle");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    loader.show(&item(0), &[]);
+    wait_idle();
+    // The full 8-ahead, 2-behind window in its priority order.
+    let window: Vec<_> = [6, 4, 7, 8, 9, 10, 11, 12, 13, 3].map(item).to_vec();
+    loader.show(&item(5), &window);
+    wait_idle();
+    let read: Vec<String> = fs
+        .calls()
+        .into_iter()
+        .filter_map(|(_, c)| match c {
+            FsCall::Read(p) => Some(p.file_stem().unwrap().to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // Two workers read at once, so neighbours in the order may log in either order.
+    assert_eq!(read[0], "0");
+    let mut rest = read[1..].to_vec();
+    rest.sort();
+    assert_eq!(
+        rest,
+        ["4", "5", "6", "7", "8"].map(String::from),
+        "the current item, then the nearest 4 of the window: {read:?}"
+    );
+    let me = std::thread::current().id();
+    assert!(fs.calls_from(me).is_empty(), "read on the caller's thread");
+}
