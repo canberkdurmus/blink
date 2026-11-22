@@ -212,7 +212,12 @@ mod tests {
                 data: vec![90; (w * h * 3) as usize],
             };
             let s = downscale(&img, 192);
-            assert!(s.width.max(s.height) <= 192, "{w}×{h} → {}×{}", s.width, s.height);
+            assert!(
+                s.width.max(s.height) <= 192,
+                "{w}×{h} → {}×{}",
+                s.width,
+                s.height
+            );
             assert!(s.width >= 1 && s.height >= 1);
             assert!(s.data.iter().all(|&v| v == 90), "{w}×{h}");
         }
