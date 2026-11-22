@@ -15,6 +15,18 @@ pub fn is_sidecar_path(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
 }
 
+/// Whether Blink may unlink `path`: only a sidecar (undo of a sidecar Blink created) or one of
+/// its own temp files. Source files are never unlinked (SPEC §1, FILE-1); both file systems
+/// enforce this in [`crate::fs::Fs::remove_file`].
+pub fn may_remove(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let temp = name.starts_with('.') && name.ends_with(".tmp") && name.contains(".blink-");
+    temp || is_sidecar_path(path)
+}
+
 fn refuse(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,

@@ -593,8 +593,25 @@ impl SidecarService {
     /// Write everything queued now and wait until it is on disk. Also waits for every message
     /// sent before it (watch events included) to be handled.
     pub fn flush(&self) {
+        self.flusher().flush();
+    }
+
+    /// A handle that flushes from another thread (a file operation must not move a sidecar
+    /// with a write still queued for it, and the UI thread must not wait on disk).
+    pub fn flusher(&self) -> Flusher {
+        Flusher(self.tx.clone())
+    }
+}
+
+/// See [`SidecarService::flusher`].
+#[derive(Clone)]
+pub struct Flusher(Option<std::sync::mpsc::Sender<Msg>>);
+
+impl Flusher {
+    /// [`SidecarService::flush`].
+    pub fn flush(&self) {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        if let Some(tx) = &self.tx
+        if let Some(tx) = &self.0
             && tx.send(Msg::Flush(done_tx)).is_ok()
         {
             let _ = done_rx.recv();

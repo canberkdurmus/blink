@@ -507,3 +507,68 @@ fn req_filt_1_req_filt_2_alt_digit_adds_a_removable_chip_and_the_sort_selector_r
     assert!(h.query_by_label("of 4").is_none());
     h.get_by_label("+ Filter");
 }
+
+#[test]
+fn req_file_1_ctrl_shift_delete_confirms_moves_rejects_to_rejected_and_ctrl_z_brings_them_back() {
+    use blink_runtime::fs::FsCall;
+    use egui::{Key, Modifiers};
+    let fs = Arc::new(folder(3));
+    fs.add_file("/f/IMG_0001.JPG", b"jpeg".to_vec());
+    let before: Vec<_> = fs.file_paths();
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    h.key_press(Key::ArrowRight);
+    h.step();
+    h.key_press(Key::X);
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Delete);
+    h.run();
+    h.get_by_label("Move 1 rejected item to _rejected/?");
+    // Escape cancels; nothing moved.
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(
+        h.query_by_label("Move 1 rejected item to _rejected/?")
+            .is_none()
+    );
+    assert_eq!(h.state().state().items.len(), 3);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Delete);
+    h.run();
+    h.get_by_label("Move").click();
+    step_until(&mut h, "rejects moved", |a| a.state().items.len() == 2);
+    h.state().flush_sidecars();
+    assert!(fs.peek("/f/_rejected/IMG_0001.ARW").is_some());
+    assert!(fs.peek("/f/_rejected/IMG_0001.JPG").is_some());
+    assert!(
+        fs.peek("/f/_rejected/IMG_0001.xmp").is_some(),
+        "the new sidecar moved too"
+    );
+    assert!(fs.peek("/f/IMG_0001.ARW").is_none());
+    // The item after the moved one is current.
+    h.run();
+    h.get_by_label("2 / 2");
+    assert_eq!(
+        h.state().state().current_item().unwrap().primary.path,
+        Path::new("/f/IMG_0002.ARW")
+    );
+    // Undo: the files come back and the item is listed again.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    step_until(&mut h, "rejects back", |a| a.state().items.len() == 3);
+    assert!(fs.peek("/f/IMG_0001.ARW").is_some());
+    assert!(fs.peek("/f/IMG_0001.JPG").is_some());
+    let mut now = fs.file_paths();
+    now.retain(|p| !p.extension().is_some_and(|e| e == "xmp"));
+    assert_eq!(now, before);
+    assert!(!fs.calls().iter().any(|c| matches!(c, FsCall::RemoveFile(p) if !p.to_string_lossy().ends_with(".xmp") && !p.to_string_lossy().ends_with(".tmp"))));
+}

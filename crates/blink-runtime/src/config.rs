@@ -5,6 +5,7 @@
 //! pick_value = 1          # 1–5
 //! auto_advance = false
 //! sidecar_style = "adobe" # or "darktable"
+//! rejects = "folder"      # apply rejects: "_rejected/" folder, or "trash" (FILE-1)
 //! [labels]
 //! red = "Red"
 //! purple = "Purple"
@@ -57,6 +58,13 @@ impl Config {
                 ("sidecar_style", _) => {
                     errs.push("sidecar_style must be \"adobe\" or \"darktable\"".into())
                 }
+                ("rejects", toml::Value::String(s)) if s == "folder" => {
+                    c.marks.reject_to_trash = false
+                }
+                ("rejects", toml::Value::String(s)) if s == "trash" => {
+                    c.marks.reject_to_trash = true
+                }
+                ("rejects", _) => errs.push("rejects must be \"folder\" or \"trash\"".into()),
                 ("labels", toml::Value::Table(t)) => {
                     for (lk, lv) in t {
                         let slot = LABEL_KEYS.iter().position(|x| x == lk);
@@ -171,5 +179,17 @@ mod tests {
         fs.add_file("/cfg/config.toml", b"pick_value = 3\n".to_vec());
         let (c, errs) = Config::load(&fs, Path::new("/cfg"));
         assert_eq!((c.marks.pick_value, errs.len()), (3, 0));
+    }
+
+    #[test]
+    fn req_file_1_config_rejects_selects_the_folder_or_the_trash() {
+        assert!(!Config::parse("").0.marks.reject_to_trash);
+        let (c, e) = Config::parse("rejects = \"trash\"");
+        assert!(c.marks.reject_to_trash && e.is_empty());
+        let (c, e) = Config::parse("rejects = \"folder\"");
+        assert!(!c.marks.reject_to_trash && e.is_empty());
+        let (c, e) = Config::parse("rejects = \"bin\"");
+        assert!(!c.marks.reject_to_trash);
+        assert_eq!(e, ["config.toml: rejects must be \"folder\" or \"trash\""]);
     }
 }
