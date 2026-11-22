@@ -899,7 +899,10 @@ fn soak(secs: u64, seed: u64) {
     // in a short soak otherwise.
     let t = Instant::now();
     while h.state().cache_usage().0 == 0 {
-        assert!(t.elapsed() < Duration::from_secs(30), "nothing was ever cached");
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "nothing was ever cached"
+        );
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
