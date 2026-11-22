@@ -154,7 +154,8 @@ fn req_open_1_a_relative_file_argument_opens_the_current_folder() {
     // `blink IMG.ARW`: the parent of a bare file name is "", which must mean ".".
     let mut h = harness(folder(1), false);
     h.state_mut().open_path(Path::new("IMG_0001.ARW"));
-    h.step();
+    // Telling a file from a folder reads the file system off the UI thread (PERF-9).
+    step_until(&mut h, "the folder opens", |a| a.state().folder.is_some());
     assert_eq!(h.state().state().folder.as_deref(), Some(Path::new(".")));
 }
 
