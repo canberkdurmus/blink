@@ -796,6 +796,111 @@ impl MemFs {
     }
 }
 
+/// Slow storage for tests (PERF-9): wraps another [`Fs`], sleeps `latency` before every call
+/// (as a USB disk or a network share would take) and records which thread made each call.
+pub struct SlowFs {
+    inner: std::sync::Arc<dyn Fs>,
+    latency: std::sync::Mutex<std::time::Duration>,
+    threads: Mutex<Vec<(std::thread::ThreadId, FsCall)>>,
+}
+
+impl SlowFs {
+    pub fn new(inner: std::sync::Arc<dyn Fs>, latency: std::time::Duration) -> Self {
+        Self {
+            inner,
+            latency: Mutex::new(latency),
+            threads: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Change the latency of later calls.
+    pub fn set_latency(&self, latency: std::time::Duration) {
+        *self.latency.lock().unwrap_or_else(|e| e.into_inner()) = latency;
+    }
+
+    /// Every call so far with the thread that made it.
+    pub fn calls(&self) -> Vec<(std::thread::ThreadId, FsCall)> {
+        self.threads.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The calls made from `thread`.
+    pub fn calls_from(&self, thread: std::thread::ThreadId) -> Vec<FsCall> {
+        self.calls()
+            .into_iter()
+            .filter(|(t, _)| *t == thread)
+            .map(|(_, c)| c)
+            .collect()
+    }
+
+    fn call(&self, c: FsCall) {
+        let latency = *self.latency.lock().unwrap_or_else(|e| e.into_inner());
+        self.threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((std::thread::current().id(), c));
+        std::thread::sleep(latency);
+    }
+}
+
+impl Fs for SlowFs {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.call(FsCall::Read(path.into()));
+        self.inner.read(path)
+    }
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        self.call(FsCall::ReadPrefix(path.into(), len));
+        self.inner.read_prefix(path, len)
+    }
+    fn metadata(&self, path: &Path) -> io::Result<Meta> {
+        self.call(FsCall::Metadata(path.into()));
+        self.inner.metadata(path)
+    }
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
+        self.call(FsCall::ReadDir(path.into()));
+        self.inner.read_dir(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.call(FsCall::Metadata(path.into()));
+        self.inner.exists(path)
+    }
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.call(FsCall::WriteNew(path.into()));
+        self.inner.write_new(path, bytes)
+    }
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        self.call(FsCall::SyncFile(path.into()));
+        self.inner.sync_file(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.call(FsCall::Rename(from.into(), to.into()));
+        self.inner.rename(from, to)
+    }
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.call(FsCall::SyncDir(dir.into()));
+        self.inner.sync_dir(dir)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.call(FsCall::RemoveFile(path.into()));
+        self.inner.remove_file(path)
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.call(FsCall::CreateDir(path.into()));
+        self.inner.create_dir(path)
+    }
+    fn move_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.call(FsCall::MoveFile(from.into(), to.into()));
+        self.inner.move_file(from, to)
+    }
+    fn trash(&self, path: &Path) -> io::Result<()> {
+        self.call(FsCall::Trash(path.into()));
+        self.inner.trash(path)
+    }
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.call(FsCall::CopyFile(from.into(), to.into()));
+        self.inner.copy_file(from, to)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
