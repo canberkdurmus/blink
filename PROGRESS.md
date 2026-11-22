@@ -1,18 +1,18 @@
 # Progress
 
-Current milestone: M3
+Current milestone: M4
 
 Ticked IDs list their tests. `cargo xtask trace` requires every ticked ID and every ID of earlier
 milestones to have a tagged, passing test.
 
 ## Next up
 
-M2 closed (gate report `docs/reports/M2.md`, pre-release `v1.0.0-m2`). **M3 Ratings and sidecars**
-starts with **FILE-4** (atomic sidecar writes through `Fs`, `blink-runtime`), which unblocks RATE-1/2/3
-(rating, label and reject keys in `blink-core` reducer + UI) and OPEN-2's on-disk per-member sidecars and
-CLI `rate`/`label` without `--dry-run` (ADR 0010). Then FILE-5..9 and PERF-7 (bench script for
-rating key → durable sidecar). The gate also needs the exiftool oracle, crash injection and two
-green nightly darktable interop runs in a row (SPEC §13).
+M3 closed (gate report `docs/reports/M3.md`, pre-release `v1.0.0-m3`). **M4 Grid, filters, files**
+starts with **VIEW-5** (grid view, `G`/`E`; `blink-core` view state + `blink-ui` grid) and **FILT-1/FILT-2**
+(filter chips and sort in the reducer; `blink-core/src/filter.rs` already parses the CLI filter
+expressions and is the starting point). Then FILE-1 (apply rejects to `_rejected/` or the OS trash via
+`trash`, ADR needed; never unlink), FILE-2, FILE-3, OPEN-3, PERF-6/8/9. File operations must join the
+RATE-3 undo history (ADR 0016 §4). Nothing is half done; no open branches.
 
 ## M0 Foundations (infrastructure)
 
@@ -94,3 +94,4 @@ green nightly darktable interop runs in a row (SPEC §13).
 - 2026-11-19 · OPEN-1, OPEN-2, OPEN-4, VIEW-2, VIEW-3, VIEW-7, VIEW-8, VIEW-10, RATE-4, CLI-1, CLI-2 closed (#6–#9) · PERF-4 blocked (serial Huffman floor ~55 ms); parallel decoder prototype under way
 - 2026-11-20 · PERF-4 closed (#10), M1 gate passed · parallel JPEG decoder (ADR 0011), bench writes results.md (#11), v1.0.0-m1
 - 2026-11-21 · VIEW-1, VIEW-4, VIEW-6, VIEW-9, PERF-1, PERF-2, PERF-3, PERF-5 closed (#14, #15), M2 gate passed · OPEN-1 relative-path fix, PERF-3 decode-ahead past the prefetch window, v1.0.0-m2
+- 2026-11-22 · RATE-1, RATE-2, RATE-3, FILE-8, PERF-7 closed (#18, #20, #23), M3 gate passed · salvaged an interrupted session's work (#19 darktable interop, #17 superseded), nightly exiftool (#22), standalone toml build fix (#25), v1.0.0-m3
