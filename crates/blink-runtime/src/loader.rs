@@ -194,26 +194,41 @@ impl<T> Cache<T> {
         })
     }
 
-    fn insert(&mut self, v: Arc<Loaded<T>>, pinned: &[Key]) {
+    /// Cache `v`, evicting least recently used entries so the total never exceeds the cap
+    /// (PERF-8). Pinned entries (the current item) go last: first its preview once its full
+    /// image is cached (the full one supersedes it), then, if `v` alone can't fit, `v` itself
+    /// is not kept. Returns whether `v` was kept.
+    fn insert(&mut self, v: Arc<Loaded<T>>, pinned: &[Key]) -> bool {
         self.tick += 1;
         let k = (v.path.clone(), v.level);
-        self.bytes += v.bytes();
-        if let Some((old, _)) = self.map.insert(k, (v, self.tick)) {
+        if let Some((old, _)) = self.map.remove(&k) {
             self.bytes -= old.bytes();
         }
-        while self.bytes > self.cap {
-            // Evict the least recently used entry that isn't pinned (current item).
+        let need = v.bytes();
+        while self.bytes + need > self.cap {
+            let superseded = |key: &Key| {
+                key.1 == Level::Preview
+                    && (self.map.contains_key(&(key.0.clone(), Level::Full))
+                        || k == (key.0.clone(), Level::Full))
+            };
             let victim = self
                 .map
                 .iter()
-                .filter(|(k, _)| !pinned.contains(k))
+                .filter(|(key, _)| !pinned.contains(key))
                 .min_by_key(|(_, (_, used))| *used)
-                .map(|(k, _)| k.clone());
-            let Some(k) = victim else { break };
-            if let Some((old, _)) = self.map.remove(&k) {
+                .map(|(key, _)| key.clone())
+                .or_else(|| self.map.keys().find(|key| superseded(key)).cloned());
+            let Some(victim) = victim else { break };
+            if let Some((old, _)) = self.map.remove(&victim) {
                 self.bytes -= old.bytes();
             }
         }
+        if self.bytes + need > self.cap {
+            return false;
+        }
+        self.bytes += need;
+        self.map.insert(k, (v, self.tick));
+        true
     }
 }
 
@@ -535,8 +550,10 @@ fn worker<T>(s: &Shared<T>) {
                     // Checked under the cache lock, which `clear()` takes after bumping the epoch.
                     let mut c = lock(&s.cache);
                     let fresh = job.epoch == s.epoch.load(Ordering::SeqCst);
-                    if fresh {
-                        c.insert(Arc::new(l), &pinned);
+                    if fresh && !c.insert(Arc::new(l), &pinned) {
+                        eprintln!(
+                            "blink: an image is larger than the whole decode cache; raise cache_mb"
+                        );
                     }
                     fresh
                 };
@@ -699,7 +716,11 @@ fn full_worker<T>(s: &Shared<T>) {
         match result {
             Ok(l) => {
                 let a = l.ready();
-                c.insert(Arc::new(l), &pinned);
+                if !c.insert(Arc::new(l), &pinned) {
+                    eprintln!(
+                        "blink: an image is larger than the whole decode cache; raise cache_mb"
+                    );
+                }
                 drop(c);
                 send(s, a);
             }
@@ -883,5 +904,84 @@ mod pace_tests {
         // A frame stalled 200 ms that covered 8 repeats is still the same run.
         p.shown(&item(13).path, &ahead(13), t0 + Duration::from_millis(325));
         assert!(p.interval.is_some());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn loaded(n: u8, level: Level, w: u32) -> Arc<Loaded<()>> {
+        Arc::new(Loaded {
+            path: format!("/f/{n}.ARW").into(),
+            level,
+            source: PreviewSource::Embedded,
+            size: (w, 1),
+            full_size: (w, 1),
+            histogram: std::sync::OnceLock::new(),
+            info: Default::default(),
+            prepared: (),
+            preview: Arc::new(Preview {
+                image: blink_decode::image::RgbImage {
+                    width: 0,
+                    height: 0,
+                    data: vec![],
+                },
+                source: PreviewSource::Embedded,
+                space: blink_decode::color::SourceSpace::Srgb,
+                orientation: 1,
+            }),
+        })
+    }
+
+    fn cache(cap: usize) -> Cache<()> {
+        Cache {
+            map: HashMap::new(),
+            tick: 0,
+            bytes: 0,
+            cap,
+        }
+    }
+
+    fn total(c: &Cache<()>) -> usize {
+        c.map.values().map(|(v, _)| v.bytes()).sum()
+    }
+
+    #[test]
+    fn req_perf_8_the_current_items_full_image_supersedes_its_preview_under_the_cap() {
+        // 7 bytes per pixel: cap of 100 px.
+        let mut c = cache(700);
+        let cur = (PathBuf::from("/f/0.ARW"), Level::Preview);
+        let pinned = [cur.clone(), (cur.0.clone(), Level::Full)];
+        assert!(c.insert(loaded(1, Level::Preview, 30), &pinned));
+        assert!(c.insert(loaded(0, Level::Preview, 40), &pinned));
+        // The full image needs 80 px: the other item goes, then the superseded preview.
+        assert!(c.insert(loaded(0, Level::Full, 80), &pinned));
+        assert_eq!(c.map.len(), 1);
+        assert!(c.map.contains_key(&(cur.0.clone(), Level::Full)));
+        // Larger than the whole cache: not kept, the cap holds.
+        assert!(!c.insert(loaded(2, Level::Full, 101), &pinned));
+        assert!(c.bytes <= c.cap);
+    }
+
+    proptest! {
+        /// PERF-8: whatever is inserted and whichever item is current, the cache never holds
+        /// more than its cap, and its byte count is exact.
+        #[test]
+        fn req_perf_8_random_inserts_never_exceed_the_cap(
+            cap in 1usize..2000,
+            ops in proptest::collection::vec((0u8..6, any::<bool>(), 1u32..120, 0u8..6), 1..80),
+        ) {
+            let mut c = cache(cap);
+            for (n, full, w, current) in ops {
+                let p = PathBuf::from(format!("/f/{current}.ARW"));
+                let pinned = [(p.clone(), Level::Preview), (p, Level::Full)];
+                let level = if full { Level::Full } else { Level::Preview };
+                c.insert(loaded(n, level, w), &pinned);
+                prop_assert!(c.bytes <= c.cap, "{} > {}", c.bytes, c.cap);
+                prop_assert_eq!(c.bytes, total(&c));
+            }
+        }
     }
 }

@@ -39,6 +39,7 @@ fn main() -> ExitCode {
         ["report", m] => report::run(m),
         ["guard", "--base", base] => guard::run(base),
         ["interop"] => interop::run(),
+        ["soak", "--minutes", m] => soak(m),
         _ => Err(USAGE.to_string()),
     };
     match res {
@@ -50,7 +51,38 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench [--allow-missing-baseline] | report Mn | guard --base REF | interop>";
+const USAGE: &str = "usage: cargo xtask <verify [--full] | trace [--gate Mn] | corpus fetch | fixtures | bench [--allow-missing-baseline] | report Mn | guard --base REF | interop | soak --minutes N>";
+
+/// Random actions against the headless app for `minutes`, checking the decode cache cap on
+/// every frame (PERF-8; nightly).
+fn soak(minutes: &str) -> Result {
+    let m: u64 = minutes
+        .parse()
+        .map_err(|_| format!("soak: minutes must be a whole number, not {minutes}"))?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let args = [
+        "nextest",
+        "run",
+        "-p",
+        "blink-ui",
+        "--locked",
+        "--no-capture",
+        "-E",
+        "test(/full_soak::/)",
+    ];
+    eprintln!("$ BLINK_SOAK_SECS={} {cargo} {}", m * 60, args.join(" "));
+    let status = Command::new(&cargo)
+        .args(args)
+        .env("BLINK_SOAK_SECS", (m * 60).to_string())
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("failed to start {cargo}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("soak failed ({status})"))
+    }
+}
 
 /// Workspace root (parent of the xtask crate).
 pub fn root() -> PathBuf {

@@ -17,6 +17,9 @@ pub fn configured_options() -> Options {
     Options {
         sidecar_style: c.sidecar_style,
         external_apps: c.external_apps(),
+        cache_bytes: c
+            .cache_bytes
+            .unwrap_or(blink_runtime::loader::DEFAULT_CACHE_BYTES),
         marks: c.marks,
         notice: (!errs.is_empty()).then(|| errs.join("; ")),
         ..Options::default()

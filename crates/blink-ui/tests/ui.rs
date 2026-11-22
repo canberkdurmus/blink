@@ -813,3 +813,83 @@ mod full_folder_watch {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Random actions for `secs` with a decode cache far smaller than the folder; the cache must
+/// never hold more than its cap (PERF-8). Seeded and printed, so a failure can be replayed.
+fn soak(secs: u64, seed: u64) {
+    use blink_core::filter::Cond;
+    use blink_core::state::{Action, MarkKey, Nav};
+    eprintln!("soak: {secs} s, seed {seed}");
+    let fs = Arc::new(folder(40));
+    // One 600×400 preview is 1.68 MB in the cache's accounting: room for about five.
+    let cap = 9 << 20;
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                cache_bytes: cap,
+                ..Options::default()
+            },
+        ),
+    );
+    let mut x = seed | 1;
+    let mut rnd = |n: u64| {
+        // xorshift64
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let (t, mut steps, mut peak) = (Instant::now(), 0u64, 0usize);
+    while t.elapsed() < Duration::from_secs(secs) {
+        let a = match rnd(12) {
+            0..=3 => Action::Navigate(Nav::Next),
+            4 => Action::Navigate(Nav::Prev),
+            5 => Action::Navigate(if rnd(2) == 0 { Nav::First } else { Nav::Last }),
+            6 => Action::Mark(MarkKey::Stars(rnd(6) as u8)),
+            7 => Action::ToggleZoom100 { cursor: None },
+            8 => Action::AddFilter(Cond::RatingAtLeast(rnd(4) as i8)),
+            9 => Action::RemoveFilter(0),
+            10 => Action::Undo,
+            _ => Action::ToggleClipping,
+        };
+        h.state_mut().dispatch(a);
+        for _ in 0..=rnd(3) {
+            h.step();
+            let (used, cap) = h.state().cache_usage();
+            peak = peak.max(used);
+            assert!(
+                used <= cap,
+                "cache {used} > cap {cap} after {steps} steps (seed {seed})"
+            );
+        }
+        steps += 1;
+    }
+    eprintln!("soak: {steps} actions, peak cache {peak} of {cap} bytes");
+    assert!(steps > 0);
+    assert!(peak > 0, "nothing was ever cached");
+}
+
+#[test]
+fn req_perf_8_random_actions_never_exceed_the_decode_cache_cap() {
+    soak(2, 0x5eed_0008);
+}
+
+/// The long soak: `cargo xtask soak --minutes N` (nightly) sets `BLINK_SOAK_SECS`.
+mod full_soak {
+    #[test]
+    fn req_perf_8_soak_never_exceeds_the_decode_cache_cap() {
+        let secs = std::env::var("BLINK_SOAK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64);
+        super::soak(secs.max(1), seed);
+    }
+}

@@ -6,6 +6,7 @@
 //! auto_advance = false
 //! sidecar_style = "adobe" # or "darktable"
 //! rejects = "folder"      # apply rejects: "_rejected/" folder, or "trash" (FILE-1)
+//! cache_mb = 2048       # decode cache cap in MiB (PERF-8), at least 512
 //! [[open_with]]          # FILE-3; replaces the default list when present
 //! name = "ART"
 //! command = ["ART", "{file}"]   # program, then arguments; {file} is the item's path
@@ -23,6 +24,11 @@ use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::state::{LabelColor, MarkPrefs};
 use std::path::Path;
 
+/// Smallest decode cache: two levels of the largest RAW still fit (PERF-8).
+pub const MIN_CACHE_MB: i64 = 512;
+/// Largest decode cache accepted (1 TiB), so the byte count can't overflow.
+pub const MAX_CACHE_MB: i64 = 1 << 20;
+
 /// File name inside the config directory.
 pub const CONFIG_FILE: &str = "config.toml";
 
@@ -31,6 +37,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub struct Config {
     pub marks: MarkPrefs,
     pub sidecar_style: SidecarStyle,
+    /// Decode cache cap in bytes (PERF-8); `None`: [`crate::loader::DEFAULT_CACHE_BYTES`].
+    pub cache_bytes: Option<usize>,
     /// The "Open in" list (FILE-3); `None`: the defaults for this OS.
     pub open_with: Option<Vec<ExternalApp>>,
 }
@@ -131,6 +139,14 @@ impl Config {
                     }
                 }
                 ("labels", _) => errs.push("labels must be a table".into()),
+                ("cache_mb", toml::Value::Integer(n))
+                    if (MIN_CACHE_MB..=MAX_CACHE_MB).contains(n) =>
+                {
+                    c.cache_bytes = Some(*n as usize * (1 << 20))
+                }
+                ("cache_mb", _) => errs.push(format!(
+                    "cache_mb must be a whole number {MIN_CACHE_MB}–{MAX_CACHE_MB}"
+                )),
                 ("open_with", v) => c.open_with = parse_open_with(v, &mut errs),
                 (other, _) => errs.push(format!("unknown key {other}")),
             }
@@ -172,6 +188,27 @@ impl Config {
 mod tests {
     use super::*;
     use crate::fs::MemFs;
+
+    #[test]
+    fn req_perf_8_cache_cap_defaults_to_2_gb_and_is_configurable() {
+        assert_eq!(crate::loader::DEFAULT_CACHE_BYTES, 2 << 30);
+        assert_eq!(Config::parse("").0.cache_bytes, None);
+        let (c, errs) = Config::parse("cache_mb = 4096");
+        assert_eq!((c.cache_bytes, errs.len()), (Some(4 << 30), 0));
+        assert_eq!(
+            Config::parse("cache_mb = 512").0.cache_bytes,
+            Some(512 << 20)
+        );
+        for bad in [
+            "cache_mb = 511",
+            "cache_mb = \"2G\"",
+            "cache_mb = 1.5",
+            "cache_mb = -1",
+        ] {
+            let (c, errs) = Config::parse(bad);
+            assert_eq!((c.cache_bytes, errs.len()), (None, 1), "{bad}");
+        }
+    }
 
     #[test]
     fn req_file_3_open_with_list_is_configurable_and_defaults_per_os() {

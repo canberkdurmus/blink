@@ -175,6 +175,8 @@ pub struct BlinkApp {
     watching: Option<(PathBuf, bool)>,
     /// A folder change was reported; rescan at this time (debounced bursts, OPEN-3).
     rescan_at: Option<Instant>,
+    /// Decode cache cap (PERF-8).
+    cache_cap: usize,
     external_apps: Vec<ExternalApp>,
     launcher: Arc<dyn Launcher>,
 }
@@ -250,6 +252,7 @@ impl BlinkApp {
         state.prefs = opts.marks;
         state.toast = opts.notice;
         let (external_apps, launcher) = (opts.external_apps, opts.launcher);
+        let cache_cap = opts.cache_bytes;
         let mut app = Self {
             state,
             fs: opts.fs,
@@ -280,6 +283,7 @@ impl BlinkApp {
             meta_wanted: Vec::new(),
             watching: None,
             rescan_at: None,
+            cache_cap,
         };
         if let Some(f) = folder {
             app.open_path(&f);
@@ -337,6 +341,11 @@ impl BlinkApp {
     /// Report sidecar paths as changed, as the folder watcher would (tests).
     pub fn sidecars_changed(&self, paths: Vec<PathBuf>) {
         self.sidecars.changed(paths);
+    }
+
+    /// Bytes the decode cache holds now, and its cap (PERF-8).
+    pub fn cache_usage(&self) -> (usize, usize) {
+        (self.loader.cache_bytes(), self.cache_cap)
     }
 
     /// Report that the folder listing changed, as the watcher would (OPEN-3; tests).
