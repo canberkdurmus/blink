@@ -63,7 +63,7 @@ green nightly darktable interop runs in a row (SPEC §13).
 - [x] FILE-7 — `req_file_7_a_full_session_leaves_every_source_file_byte_identical`, `req_file_7_writes_only_ever_touch_sidecars` (#16)
 - [x] FILE-8 — `req_file_8_own_writes_are_not_external_changes`, `req_file_8_external_change_with_unsaved_changes_keeps_the_disk_version`, `req_file_8_a_change_on_disk_before_the_debounced_write_is_never_overwritten`, `req_file_8_a_write_whose_directory_fsync_failed_is_still_blinks_own`, `req_file_8_a_reload_read_before_a_newer_mark_is_ignored`, `req_file_8_sidecar_names_match_across_separators_and_case`, `req_file_8_external_change_reloads_and_a_conflict_keeps_disk_and_shows_a_marker` (UI), `full_watch::req_file_8_the_folder_watcher_reports_a_sidecar_another_app_writes` (real watcher, green on all 6 targets) (#20, ADR 0018)
 - [x] FILE-9 — `req_file_9_metadata_date_is_written_on_every_change`, `req_file_9_every_write_sets_metadata_date` (#16)
-- [ ] PERF-7
+- [x] PERF-7 — `req_perf_7_rating_key_to_durable_sidecar` (full tier; CI median 101.1 ms, budget 250 ms, run 44965790605) (#23, ADR 0019)
 
 ## M4 Grid, filters, files
 
