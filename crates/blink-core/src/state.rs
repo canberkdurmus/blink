@@ -2711,11 +2711,18 @@ mod tests {
             },
         );
         assert!(!e.file_op_running);
+        // The fixture joins paths, so the separator is the platform's.
+        let f = |n: &str| Path::new("/f").join(n).display().to_string();
         assert_eq!(
             fx,
             [Effect::WriteExport {
                 path: "/x/l.csv".into(),
-                contents: "path,rating,label,pick\n/f/a.ARW,3,Red,false\n/f/a.JPG,3,Red,false\n/f/c.ARW,4,,false\n".into(),
+                contents: format!(
+                    "path,rating,label,pick\n{},3,Red,false\n{},3,Red,false\n{},4,,false\n",
+                    f("a.ARW"),
+                    f("a.JPG"),
+                    f("c.ARW")
+                ),
             }]
         );
         let (e, _) = reduce(
