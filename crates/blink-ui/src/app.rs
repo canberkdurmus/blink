@@ -178,7 +178,7 @@ pub struct BlinkApp {
     /// Scans running, by folder and mode; `true`: run it again when it returns.
     scans: HashMap<(PathBuf, bool), bool>,
     /// Bumped by every [`BlinkApp::open_path`]: only the latest one opens (PERF-9).
-    open_seq: Arc<std::sync::atomic::AtomicU64>,
+    open_seq: Arc<std::sync::Mutex<u64>>,
     /// Decode cache cap (PERF-8).
     cache_cap: usize,
     external_apps: Vec<ExternalApp>,
@@ -370,8 +370,7 @@ impl BlinkApp {
     /// a network share may take seconds); the folder opens when the answer comes back, unless a
     /// later `open_path` came first.
     pub fn open_path(&mut self, p: &Path) {
-        use std::sync::atomic::Ordering;
-        let seq = self.open_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let seq = self.next_open();
         let (fs, tx, ctx, latest) = (
             self.fs.clone(),
             self.tx.clone(),
@@ -390,11 +389,20 @@ impl BlinkApp {
                     .unwrap_or(Path::new("."))
                     .to_path_buf()
             };
-            if latest.load(Ordering::SeqCst) == seq {
+            // Compare and send under the lock: a newer open can't slip in between.
+            let latest = latest.lock().unwrap_or_else(|e| e.into_inner());
+            if *latest == seq {
                 let _ = tx.send(Action::OpenFolder(folder));
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Start a new open: any open still resolving in the background is dropped.
+    fn next_open(&self) -> u64 {
+        let mut s = self.open_seq.lock().unwrap_or_else(|e| e.into_inner());
+        *s += 1;
+        *s
     }
 
     /// Run an action through the reducer and execute its effects.
@@ -424,6 +432,8 @@ impl BlinkApp {
                 Default::default()
             };
             if matches!(a, Action::OpenFolder(_)) {
+                // This open wins over any `open_path` still resolving in the background.
+                self.next_open();
                 // Files may have changed on disk: never reuse an old texture for a path.
                 self.textures.clear();
                 self.overlay_textures.clear();

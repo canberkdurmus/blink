@@ -947,16 +947,32 @@ fn req_perf_9_the_ui_thread_never_touches_slow_storage() {
         Action::Undo,
         Action::ToggleClipping,
         Action::Navigate(Nav::First),
+        Action::Mark(MarkKey::Stars(2)),
     ];
-    let t = Instant::now();
+    step_until(&mut h, "the folder opens", |a| a.state().items.len() == 12);
+    settle(&mut h);
     for a in actions {
         h.state_mut().dispatch(a);
-        for _ in 0..5 {
-            h.step();
-        }
+        settle(&mut h);
+    }
+    // The mark and its undo reached the sidecar writer (off the UI thread).
+    let written = || {
+        slow.calls()
+            .iter()
+            .any(|(_, c)| matches!(c, blink_runtime::fs::FsCall::Rename(..)))
+    };
+    let t = Instant::now();
+    while !written() {
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "no sidecar was written"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
     }
     h.state().folder_changed();
-    while t.elapsed() < Duration::from_secs(3) {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(1) {
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -967,4 +983,36 @@ fn req_perf_9_the_ui_thread_never_touches_slow_storage() {
         [],
         "file-system calls on the UI thread"
     );
+}
+
+/// A folder opened while an earlier `open_path` is still telling a file from a folder on slow
+/// storage stays open: the late answer is dropped (OPEN-1, PERF-9).
+#[test]
+fn req_open_1_req_perf_9_a_later_open_wins_over_one_still_resolving() {
+    use blink_runtime::fs::SlowFs;
+    let mem = folder(2);
+    mem.add_file("/g/IMG_0100.ARW", raw(10));
+    let slow = Arc::new(SlowFs::new(Arc::new(mem), Duration::from_millis(400)));
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            None,
+            Options {
+                fs: slow.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    h.state_mut().open_path(Path::new("/f/IMG_0001.ARW"));
+    h.state_mut()
+        .dispatch(blink_core::state::Action::OpenFolder("/g".into()));
+    step_until(&mut h, "/g opens", |a| a.state().items.len() == 1);
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(1500) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(h.state().state().folder.as_deref(), Some(Path::new("/g")));
 }

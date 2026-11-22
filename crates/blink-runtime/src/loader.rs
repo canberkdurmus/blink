@@ -508,6 +508,8 @@ impl<T: Send + Sync + 'static> Loader<T> {
         drop(q);
         *lock(&self.shared.current) = None;
         lock(&self.shared.full).next = None;
+        // Another folder may be on other storage: measure it afresh (PERF-9).
+        lock(&self.shared.pace).read = None;
         let mut c = lock(&self.shared.cache);
         c.map.clear();
         c.bytes = 0;

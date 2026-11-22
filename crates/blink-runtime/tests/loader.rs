@@ -425,8 +425,8 @@ fn req_perf_9_slow_reads_shrink_the_prefetch_window_to_the_measured_throughput()
     for n in 0..20 {
         mem.add_file(format!("/f/{n}.ARW"), low_res_raw());
     }
-    // About one second per read, two workers: about 2 items/s, 4 in the 2 s horizon.
-    let fs = Arc::new(SlowFs::new(Arc::new(mem), Duration::from_millis(950)));
+    // 0.85–1 s per read, two workers: 2–2.4 items/s, 4 in the 2 s horizon (sleeps only overshoot).
+    let fs = Arc::new(SlowFs::new(Arc::new(mem), Duration::from_millis(850)));
     let loader: Loader<()> = Loader::new(fs.clone(), Arc::new(FakeRaw), 2, 1 << 30, |_| (), || {});
     let item = |n: usize| blink_core::state::ItemRef {
         path: format!("/f/{n}.ARW").into(),
@@ -454,10 +454,14 @@ fn req_perf_9_slow_reads_shrink_the_prefetch_window_to_the_measured_throughput()
             _ => None,
         })
         .collect();
+    // Two workers read at once, so neighbours in the order may log in either order.
+    assert_eq!(read[0], "0");
+    let mut rest = read[1..].to_vec();
+    rest.sort();
     assert_eq!(
-        read,
-        ["0", "5", "6", "4", "7", "8"].map(String::from),
-        "the current item, then the nearest 4 of the window"
+        rest,
+        ["4", "5", "6", "7", "8"].map(String::from),
+        "the current item, then the nearest 4 of the window: {read:?}"
     );
     let me = std::thread::current().id();
     assert!(fs.calls_from(me).is_empty(), "read on the caller's thread");
