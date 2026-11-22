@@ -298,6 +298,28 @@ fn req_file_5_unparseable_sidecars_are_refused_not_overwritten() {
     }
 }
 
+/// The nightly fuzzer (`xmp_write`) found that a non-XML whitespace byte such as `\v` after the
+/// element name was copied into the attribute separator, so a rewritten `xmlns` lost its
+/// namespace and the written label could not be read back.
+#[test]
+fn req_file_5_only_xml_whitespace_separates_rewritten_attributes() {
+    let label = Edit::Set("Red & <Blue>".to_string());
+    let minimal: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+        xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description\n\x0b\
+        rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"/></rdf:RDF></x:xmpmeta>";
+    let fuzz_crash: &[u8] = b"/lns=\n\n'http:/p/www.w3.org/<Description\n\x0b'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj'x\x000\x02\x000\x02=\n\n''xmlns=\n\n'http://www.w3.org/1999/02/22-rdf-syntax-ns#'*\x10\x00s=\n\n'thtp:.org/199\"\"\"\"9/\x00\n<4/]>(<'/>\x00\x00\x00'";
+    for xml in [minimal, fuzz_crash] {
+        let Ok(before) = read_owned(xml) else {
+            continue;
+        };
+        if let Ok(out) = write_owned(Some(xml), &edit(Edit::Keep, label.clone())) {
+            let got = read_owned(&out).expect("rewritten sidecar parses");
+            assert_eq!(got.rating, before.rating, "{}", s(&out));
+            assert_eq!(got.label.as_deref(), Some("Red & <Blue>"), "{}", s(&out));
+        }
+    }
+}
+
 #[test]
 fn req_file_5_a_foreign_xmp_prefix_is_not_shadowed() {
     // `xmp:` is bound to another namespace on an ancestor: Blink must not rebind it.
