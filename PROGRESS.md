@@ -76,7 +76,7 @@ RATE-3 undo history (ADR 0016 §4). Nothing is half done; no open branches.
 - [x] OPEN-3 — `req_open_3_a_folder_change_rescans_and_the_listing_adds_removes_and_renames_items`, `req_open_3_added_removed_and_renamed_files_show_within_1_s`, `req_open_3_the_real_watcher_shows_added_removed_and_renamed_files_within_1_s` (full tier, real watcher) (#30, ADR 0024; green on all 6 targets)
 - [ ] PERF-6
 - [x] PERF-8 — `req_perf_8_random_inserts_never_exceed_the_cap`, `req_perf_8_random_actions_never_exceed_the_decode_cache_cap`, `req_perf_8_cache_cap_defaults_to_2_gb_and_is_configurable`, `req_perf_8_the_current_items_full_image_supersedes_its_preview_under_the_cap`, `req_perf_8_soak_never_exceeds_the_decode_cache_cap` (soak: `cargo xtask soak`, nightly) (#30, ADR 0025)
-- [ ] PERF-9
+- [x] PERF-9 — `req_perf_9_the_window_holds_what_the_measured_reads_bring_in_within_the_horizon`, `req_perf_9_slow_reads_shrink_the_prefetch_window_to_the_measured_throughput`, `req_perf_9_the_ui_thread_never_touches_slow_storage`, `req_open_1_req_perf_9_a_later_open_wins_over_one_still_resolving` (#33, ADR 0027; green on all 6 targets)
 
 ## M5 Release candidate
 
