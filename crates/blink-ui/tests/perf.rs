@@ -79,6 +79,9 @@ mod full_perf {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = blink_testkit::fixtures::perf_folder(2000).join("IMG_0000.ARW");
+        // Saved now: the RAWs are hard links to `src`, so reading `src` afterwards would see any
+        // write too.
+        let raw_bytes = std::fs::read(&src).unwrap();
         for i in 0..21 {
             let dst = dir.join(format!("IMG_{i:04}.ARW"));
             if std::fs::hard_link(&src, &dst).is_err() {
@@ -93,8 +96,10 @@ mod full_perf {
             let want = (i % 5 + 1) as i8;
             assert_eq!(blink_xmp::read_owned(&x).unwrap().rating, Some(want));
         }
-        let raw = std::fs::read(dir.join("IMG_0000.ARW")).unwrap();
-        assert_eq!(raw, std::fs::read(&src).unwrap());
+        for i in 0..21 {
+            let raw = std::fs::read(dir.join(format!("IMG_{i:04}.ARW"))).unwrap();
+            assert!(raw == raw_bytes, "IMG_{i:04}.ARW changed (FILE-7)");
+        }
     }
 
     /// PERF-5 uses the 50 MP Sony ILCE-1M2 file from the corpus (`cargo xtask corpus fetch`).
