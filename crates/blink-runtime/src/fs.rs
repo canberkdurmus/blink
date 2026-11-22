@@ -211,6 +211,7 @@ impl Fs for RealFs {
     }
 
     fn trash(&self, path: &Path) -> io::Result<()> {
+        trash_moves_without_copying(path)?;
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut ctx = trash::TrashContext::default();
         #[cfg(target_os = "macos")]
@@ -222,6 +223,60 @@ impl Fs for RealFs {
         ctx.delete(path)
             .map_err(|e| io::Error::other(e.to_string()))
     }
+}
+
+/// Refuse to trash a file unless the OS trash takes it with a rename (ADR 0021). Linux: the
+/// `trash` crate falls back to the home trash on volumes without a usable top-directory trash,
+/// and moves across volumes by copy + unlink; so the file must be on the home trash's volume.
+/// Windows: a volume without a Recycle Bin (most removable drives) may delete for good, so its
+/// root must hold `$Recycle.Bin`. macOS: NSFileManager fails rather than deletes.
+fn trash_moves_without_copying(path: &Path) -> io::Result<()> {
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{}: {why}; set rejects = \"folder\" in config.toml",
+                path.display()
+            ),
+        ))
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let home_trash = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+            .map(|d| d.join("Trash"));
+        let dev = |p: &Path| {
+            p.ancestors()
+                .find_map(|a| std::fs::metadata(a).ok())
+                .map(|m| m.dev())
+        };
+        let file_dev = std::fs::metadata(path)?.dev();
+        if home_trash.as_deref().and_then(dev) != Some(file_dev) {
+            return refuse(
+                "not on the same volume as the trash (it would be copied, then deleted)",
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let root: PathBuf = path
+            .components()
+            .take_while(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+            .collect();
+        if !root.join("$Recycle.Bin").exists() {
+            return refuse("this drive has no Recycle Bin (the file could be deleted for good)");
+        }
+    }
+    let _ = refuse;
+    Ok(())
 }
 
 /// One call made against a [`MemFs`].

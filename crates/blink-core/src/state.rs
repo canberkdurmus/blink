@@ -216,6 +216,9 @@ pub struct State {
     pub confirm: Option<Confirm>,
     /// A file operation is running: undo, redo and apply rejects wait for its result.
     pub file_op_running: bool,
+    /// The running operation's folder and, for undo/redo, the moves it asked for: moves that
+    /// didn't happen stay in the history, and a result for another folder isn't recorded.
+    pub file_op: Option<(PathBuf, Vec<(PathBuf, PathBuf)>)>,
     /// Items whose sidecar changed on disk while Blink had unsaved changes for it: the on-disk
     /// version was kept (FILE-8). Shown as a conflict marker until the item is marked again.
     pub conflicts: std::collections::BTreeSet<PathBuf>,
@@ -291,6 +294,7 @@ impl State {
             mark_gen: BTreeMap::new(),
             confirm: None,
             file_op_running: false,
+            file_op: None,
             filter: Filter::default(),
             sort: SortKey::default(),
             meta: BTreeMap::new(),
@@ -520,13 +524,15 @@ impl State {
             Edit::Mark(m) => m,
             Edit::Files(f) => {
                 // The edit goes back on the other stack when the runtime reports the moves.
+                let moves = if forward {
+                    f.moves.clone()
+                } else {
+                    f.reversed()
+                };
                 self.file_op_running = true;
+                self.file_op = self.folder.clone().map(|d| (d, moves.clone()));
                 fx.push(Effect::FileOp {
-                    op: FileOp::Moves(if forward {
-                        f.moves.clone()
-                    } else {
-                        f.reversed()
-                    }),
+                    op: FileOp::Moves(moves),
                     kind: if forward {
                         FileOpKind::Redo
                     } else {
@@ -587,10 +593,10 @@ impl State {
             .chain(self.visible[..p].iter().rev())
             .map(|&i| path_at(self, i))
             .find(|q| !gone.contains(q));
+        let cur = self.current_item().map(|i| i.primary.path.clone());
         self.items.retain(|i| !gone.contains(&i.primary.path));
         self.visible = self.compute_visible();
         let next = next.and_then(|q| self.items.iter().position(|i| i.primary.path == q));
-        let cur = self.current_item().map(|i| i.primary.path.clone());
         let same = cur.is_some() && next.map(|n| path_at(self, n)) == cur;
         if same {
             // Indices shifted; the item is the same.
@@ -1151,6 +1157,12 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             }
             s.refresh_marks_view(&mut fx);
         }
+        Action::SetRating { .. } | Action::SetLabel { .. } | Action::Mark(_)
+            if s.file_op_running =>
+        {
+            // A late sidecar write would recreate a sidecar next to a file that just moved.
+            s.toast = Some("A file operation is still running".into());
+        }
         Action::SetRating { item, rating } => {
             if let Some(it) = s.items.get(item)
                 && (-1..=5).contains(&rating)
@@ -1231,6 +1243,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     .collect();
                 if !items.is_empty() && !s.file_op_running {
                     s.file_op_running = true;
+                    s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
                     fx.push(Effect::FileOp {
                         op: FileOp::Rejects { items, to_trash },
                         kind: FileOpKind::ApplyRejects { to_trash },
@@ -1246,6 +1259,25 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             errors,
         } => {
             s.file_op_running = false;
+            let (op_folder, requested) = s.file_op.take().unzip();
+            if op_folder.is_none() || op_folder != s.folder {
+                // Another folder was opened meanwhile: its history and items are not this
+                // operation's (ADR 0016 §4).
+                if !errors.is_empty() {
+                    s.log.push(format!(
+                        "Some files could not be moved: {}",
+                        errors.join("; ")
+                    ));
+                }
+                return (s, fx);
+            }
+            // Requested moves that didn't happen (undo/redo): their files are still where they
+            // were, so that part of the edit stays where it was in the history.
+            let unmade: Vec<(PathBuf, PathBuf)> = requested
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| !moves.contains(m))
+                .collect();
             let gone: std::collections::BTreeSet<PathBuf> = moves
                 .iter()
                 .map(|(from, _)| from.clone())
@@ -1273,12 +1305,20 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     });
                 }
                 FileOpKind::Redo => {
+                    if !unmade.is_empty() {
+                        s.redo.push(Edit::Files(FilesEdit { moves: unmade }));
+                    }
                     if !moves.is_empty() {
                         s.undo.push(Edit::Files(edit));
                     }
                     s.remove_items(&gone, &mut fx);
                 }
                 FileOpKind::Undo => {
+                    if !unmade.is_empty() {
+                        s.undo.push(Edit::Files(FilesEdit {
+                            moves: FilesEdit { moves: unmade }.reversed(),
+                        }));
+                    }
                     if !moves.is_empty() {
                         // Stored forward, so redo makes the original moves again.
                         s.redo.push(Edit::Files(FilesEdit {
@@ -2388,5 +2428,136 @@ mod tests {
         assert_eq!(s.undo.len(), undo_len, "the trash is not undoable in Blink");
         assert!(s.toast.as_deref().unwrap().contains("/f/x: busy"));
         assert!(s.log.iter().any(|l| l.contains("/f/x: busy")));
+    }
+
+    fn image_ready(s: &State) -> State {
+        let path = s.current_item().unwrap().primary.path.clone();
+        reduce(
+            s,
+            Action::ImageReady {
+                path,
+                level: Level::Preview,
+                source: PreviewSource::Embedded,
+                size: (10, 10),
+                full_size: (10, 10),
+            },
+        )
+        .0
+    }
+
+    #[test]
+    fn req_file_1_a_running_move_blocks_marks_and_a_moved_current_item_never_shows_stale_pixels() {
+        let s = opened(&["a.ARW", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Next));
+        let s = image_ready(&s);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        // While the move runs, marks wait (a late write would land next to a moved file).
+        for a in [
+            Action::Mark(MarkKey::Stars(3)),
+            Action::SetRating { item: 1, rating: 2 },
+            Action::SetLabel {
+                item: 1,
+                label: Some("Red".into()),
+            },
+        ] {
+            let (b, fx) = reduce(&s, a);
+            assert!(fx.is_empty());
+            assert_eq!(b.marks, s.marks);
+        }
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+                moves: vec![("/f/b.ARW".into(), "/f/_rejected/b.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        // b's pixels, zoom request and all are gone with it.
+        assert_eq!(s.loupe.shown, None);
+        // Removing an item before the current one keeps the current item and its pixels.
+        let s = image_ready(&s);
+        let shown = s.loupe.shown.clone();
+        let (s, _) = reduce(&s, Action::Navigate(Nav::First));
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::Navigate(Nav::Last));
+        let s = image_ready(&s);
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        let (s, _) = reduce(
+            &s,
+            Action::FilesMoved {
+                kind: FileOpKind::ApplyRejects { to_trash: false },
+                moves: vec![("/f/a.ARW".into(), "/f/_rejected/a.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(cur_name(&s).as_deref(), Some("c.ARW"));
+        assert_eq!(s.loupe.shown, shown);
+    }
+
+    #[test]
+    fn req_file_1_moves_an_undo_could_not_make_stay_undoable_and_other_folders_are_ignored() {
+        let s = opened(&["a.ARW", "b.ARW"]);
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Reject));
+        let (s, _) = reduce(&s, Action::ApplyRejects);
+        let (s, _) = reduce(&s, Action::Confirm);
+        let moves = vec![
+            (
+                PathBuf::from("/f/a.ARW"),
+                PathBuf::from("/f/_rejected/a.ARW"),
+            ),
+            ("/f/a.xmp".into(), "/f/_rejected/a.xmp".into()),
+        ];
+        let done = |s: &State, kind, moves: Vec<(PathBuf, PathBuf)>, errors: Vec<String>| {
+            reduce(
+                s,
+                Action::FilesMoved {
+                    kind,
+                    moves,
+                    trashed: vec![],
+                    errors,
+                },
+            )
+            .0
+        };
+        let s = done(
+            &s,
+            FileOpKind::ApplyRejects { to_trash: false },
+            moves.clone(),
+            vec![],
+        );
+        let undo_len = s.undo.len();
+        // Undo: the sidecar can't go back (a file took its name), the RAW can.
+        let (s, _) = reduce(&s, Action::Undo);
+        let s = done(
+            &s,
+            FileOpKind::Undo,
+            vec![("/f/_rejected/a.ARW".into(), "/f/a.ARW".into())],
+            vec!["/f/_rejected/a.xmp: exists".into()],
+        );
+        assert_eq!(s.undo.len(), undo_len, "the unmade part stays undoable");
+        assert_eq!(
+            s.undo.last(),
+            Some(&Edit::Files(FilesEdit {
+                moves: vec![moves[1].clone()]
+            }))
+        );
+        assert_eq!(
+            s.redo.last(),
+            Some(&Edit::Files(FilesEdit {
+                moves: vec![moves[0].clone()]
+            }))
+        );
+        // A result arriving after another folder was opened doesn't enter its history.
+        let (s, _) = reduce(&s, Action::Undo);
+        let (s, _) = reduce(&s, Action::OpenFolder("/g".into()));
+        let s = done(&s, FileOpKind::Undo, vec![moves[1].clone()], vec![]);
+        assert!(!s.file_op_running);
+        assert!(s.undo.is_empty() && s.redo.is_empty());
     }
 }

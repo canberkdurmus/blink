@@ -398,13 +398,11 @@ impl BlinkApp {
                         .sidecars
                         .queue(source.clone(), change.clone(), *owns_adobe_name),
                     Effect::FileOp { op, kind } => {
-                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
-                        let (op, kind) = (op.clone(), *kind);
-                        let flusher = self.sidecars.flusher();
-                        std::thread::spawn(move || {
-                            // Queued sidecar writes land before their files move (FILE-1).
-                            flusher.flush();
-                            let out = blink_runtime::files::run(fs.as_ref(), &op);
+                        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+                        let kind = *kind;
+                        // On the sidecar thread: queued writes land first, and the writer
+                        // knows the moved sidecars are its own change (FILE-1, FILE-8).
+                        self.sidecars.file_op(op.clone(), move |out| {
                             let _ = tx.send(Action::FilesMoved {
                                 kind,
                                 moves: out.moves,

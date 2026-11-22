@@ -363,4 +363,81 @@ mod tests {
         assert_eq!(std::fs::read(&other).unwrap(), b"other");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// Linux: a file on another volume than the home trash is refused (the crate would copy it,
+    /// then unlink the source); on the same volume it goes to the trash by rename.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn req_file_1_the_real_fs_never_trashes_across_volumes() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("blink-trash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.ARW");
+        std::fs::write(&f, b"raw").unwrap();
+        let home = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+            .unwrap()
+            .join("Trash");
+        let trash_dev = home
+            .ancestors()
+            .find_map(|a| std::fs::metadata(a).ok())
+            .unwrap()
+            .dev();
+        let same = std::fs::metadata(&f).unwrap().dev() == trash_dev;
+        match crate::fs::RealFs.trash(&f) {
+            Ok(()) => assert!(same && !f.exists()),
+            Err(e) => {
+                assert!(!same, "{e}");
+                assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
+                assert_eq!(std::fs::read(&f).unwrap(), b"raw");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Blink's own moves are not another app's changes (FILE-8), and an undo to the session's
+    /// original still restores the original bytes after the sidecar moved away and back.
+    #[test]
+    fn req_file_1_moved_sidecars_stay_blinks_own_and_undo_restores_the_original() {
+        use crate::sidecar::{FixedClock, SidecarStyle, SidecarWriter};
+        use blink_core::state::MarkChange;
+        let fs = MemFs::new();
+        fs.add_file("/f/a.ARW", b"raw".to_vec());
+        let original = blink_testkit::sidecars::lightroom(2, None);
+        fs.add_file("/f/a.xmp", original.clone());
+        let clock = FixedClock(1_700_000_000);
+        let mut w = SidecarWriter::new(&fs, &clock, SidecarStyle::Adobe);
+        let now = std::time::Instant::now();
+        w.queue(p("/f/a.ARW"), MarkChange::Rating(Some(-1)), true, now);
+        assert!(w.flush_all().iter().all(|r| r.result.is_ok()));
+        let op = FileOp::Rejects {
+            items: vec![vec![(p("/f/a.ARW"), true)]],
+            to_trash: false,
+        };
+        let out = run(&fs, &op);
+        let as_moved = |m: &[(PathBuf, PathBuf)]| -> Vec<(PathBuf, Option<PathBuf>)> {
+            m.iter()
+                .map(|(a, b)| (a.clone(), Some(b.clone())))
+                .collect()
+        };
+        w.moved(&as_moved(&out.moves));
+        assert_eq!(w.external_change(Path::new("/f/a.xmp")), None);
+        assert_eq!(w.external_change(Path::new("/f/_rejected/a.xmp")), None);
+        // Undo the move, then the reject.
+        let back: Vec<_> = out
+            .moves
+            .iter()
+            .rev()
+            .map(|(a, b)| (b.clone(), a.clone()))
+            .collect();
+        let undo = run(&fs, &FileOp::Moves(back.clone()));
+        w.moved(&as_moved(&undo.moves));
+        assert_eq!(w.external_change(Path::new("/f/a.xmp")), None);
+        assert_eq!(w.external_change(Path::new("/f/_rejected/a.xmp")), None);
+        w.queue(p("/f/a.ARW"), MarkChange::RevertRating, true, now);
+        assert!(w.flush_all().iter().all(|r| r.result.is_ok()));
+        assert_eq!(fs.peek("/f/a.xmp"), Some(original.into()));
+    }
 }
