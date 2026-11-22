@@ -155,6 +155,9 @@ pub struct BlinkApp {
     filter_text: String,
     /// Why the expression didn't parse.
     filter_error: Option<String>,
+    /// A scan finished; read capture metadata once the first image is on screen, so it never
+    /// competes with it (PERF-1).
+    meta_wanted: bool,
 }
 
 impl BlinkApp {
@@ -251,6 +254,7 @@ impl BlinkApp {
             loupe_rect: None,
             filter_text: String::new(),
             filter_error: None,
+            meta_wanted: false,
         };
         if let Some(f) = folder {
             app.open_path(&f);
@@ -354,6 +358,12 @@ impl BlinkApp {
             }
             if scanned {
                 self.load_marks();
+                self.meta_wanted = true;
+            }
+            if self.meta_wanted
+                && (self.state.loupe.shown.is_some() || self.state.current.is_none())
+            {
+                self.meta_wanted = false;
                 self.load_meta();
             }
             for e in fx {

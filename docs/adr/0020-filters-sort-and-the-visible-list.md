@@ -30,9 +30,11 @@ sort runs, or whether filters survive opening another folder.
    never depends on the scan order (property-tested).
 4. **Capture metadata.** `ItemMeta` (body as the info panel shows it, lens, focal length, ISO,
    `DateTimeOriginal`) is read by `blink_runtime::meta` on a background thread after each scan
-   and arrives in chunks of 256 items as `Action::MetaLoaded`. Only the first 256 KiB of each file
+   and arrives in chunks of 256 items as `Action::MetaLoaded`. The scan starts only once the first
+   image is on screen, so it never competes with it (PERF-1). Only the first 256 KiB of each file
    is read, through the new `Fs::read_prefix`. EXIF sits within 128 KiB in every corpus file. A
-   prefix that yields neither a model nor a date is read again as the whole file. HEIF files
+   prefix that yields no EXIF value at all is read again up to 4 MiB. Files are never read whole:
+   2,000 whole-file reads made PERF-1 31 % slower in CI. HEIF files
    aren't parsed in v1 (D-4). An item without a value fails every condition on that field.
    Dates compare as `YYYY-MM-DD` on the camera's local date. No time-zone conversion is done.
 5. **Syntax.** The CLI `--filter` and the GUI's expression field share one parser:

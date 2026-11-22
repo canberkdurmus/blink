@@ -8,8 +8,11 @@ use blink_core::item::Item;
 use std::path::{Path, PathBuf};
 
 /// Bytes read from the start of a file. EXIF sits within the first 128 KiB of every corpus file
-/// (RAF: inside the embedded JPEG); a file whose prefix yields nothing is read whole.
+/// (RAF: inside the embedded JPEG).
 pub const PREFIX: usize = 256 * 1024;
+/// A file whose first [`PREFIX`] bytes yield no EXIF value at all is read again up to this
+/// size. Never the whole file: 2,000 RAWs read whole would compete with the decoder (PERF-1).
+pub const LONG_PREFIX: usize = 4 * 1024 * 1024;
 
 fn from_exif(e: &blink_decode::exif::ExifInfo) -> ItemMeta {
     ItemMeta {
@@ -28,11 +31,11 @@ pub fn file_meta(fs: &dyn Fs, path: &Path, kind: FileKind) -> Option<ItemMeta> {
     }
     let head = fs.read_prefix(path, PREFIX).ok()?;
     let e = blink_decode::exif::read(&head);
-    if e.model.is_some() || e.date_time_original.is_some() || head.len() < PREFIX {
+    if e != blink_decode::exif::ExifInfo::default() || head.len() < PREFIX {
         return Some(from_exif(&e));
     }
-    let whole = fs.read(path).ok()?;
-    Some(from_exif(&blink_decode::exif::read(&whole)))
+    let longer = fs.read_prefix(path, LONG_PREFIX).ok()?;
+    Some(from_exif(&blink_decode::exif::read(&longer)))
 }
 
 /// Capture metadata of each item's primary file, in `items` order. Items whose metadata can't
@@ -79,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn req_filt_1_metadata_is_read_from_the_file_start_and_whole_only_when_needed() {
+    fn req_filt_1_metadata_is_read_from_the_file_start_and_never_whole() {
         let fs = MemFs::new();
         fs.add_file("/f/near.DNG", tiff_with_model("NEAR", 64));
         fs.add_file("/f/far.DNG", tiff_with_model("FAR AWAY", PREFIX + 10));
@@ -102,8 +105,27 @@ mod tests {
                 ("/f/far.DNG".to_string(), Some("FAR AWAY".to_string())),
             ]
         );
+        // Never a whole-file read: prefixes only (PERF-1).
+        assert!(!fs.calls().iter().any(|c| matches!(c, FsCall::Read(_))));
+        // A file with EXIF in the prefix but no model or date isn't read again.
+        let fs2 = MemFs::new();
+        let mut b = tiff_with_model("XCAMERA", 64);
+        b.resize(PREFIX * 2, 0);
+        fs2.add_file("/f/y.DNG", b);
+        let got = load_meta(&fs2, &[item("/f/y.DNG", FileKind::Dng)]);
+        assert_eq!(got[0].1.body.as_deref(), Some("XCAMERA"));
+        assert_eq!(fs2.calls(), [FsCall::ReadPrefix("/f/y.DNG".into(), PREFIX)]);
+        // The far one needed the longer prefix.
+        assert!(
+            fs.calls()
+                .contains(&FsCall::ReadPrefix("/f/far.DNG".into(), LONG_PREFIX))
+        );
         // Read-only: no writes, and HEIF isn't opened.
         assert!(fs.calls().iter().all(|c| !c.is_write()));
-        assert!(!fs.calls().contains(&FsCall::Read("/f/x.HEIC".into())));
+        assert!(
+            !fs.calls()
+                .iter()
+                .any(|c| matches!(c, FsCall::ReadPrefix(p, _) if p.ends_with("x.HEIC")))
+        );
     }
 }
