@@ -820,7 +820,10 @@ impl SlowFs {
 
     /// Every call so far with the thread that made it.
     pub fn calls(&self) -> Vec<(std::thread::ThreadId, FsCall)> {
-        self.threads.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The calls made from `thread`.
