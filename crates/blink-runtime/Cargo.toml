@@ -15,6 +15,7 @@ workspace = true
 blink-core.workspace = true
 directories = "=6.0.0"
 toml = { version = "1", default-features = false, features = ["std", "parse"] }
+notify = { version = "=9.0.0", default-features = false, features = ["macos_fsevent"] }
 blink-decode = { path = "../blink-decode" }
 blink-xmp = { path = "../blink-xmp" }
 

@@ -141,6 +141,13 @@ pub struct State {
     pub undo: Vec<MarkEdit>,
     /// Undone edits, most recently undone last.
     pub redo: Vec<MarkEdit>,
+    /// Items whose sidecar changed on disk while Blink had unsaved changes for it: the on-disk
+    /// version was kept (FILE-8). Shown as a conflict marker until the item is marked again.
+    pub conflicts: std::collections::BTreeSet<PathBuf>,
+    /// Session log (FILE-8 conflicts and external reloads), oldest first.
+    pub log: Vec<String>,
+    /// Mark changes per item (edits, undo, redo): a reload read before the latest one is stale.
+    pub mark_gen: BTreeMap<PathBuf, u64>,
 }
 
 /// What the runtime needs to load an item's pixels.
@@ -195,6 +202,9 @@ impl State {
             prefs: MarkPrefs::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            conflicts: Default::default(),
+            log: Vec::new(),
+            mark_gen: BTreeMap::new(),
         }
     }
 
@@ -284,6 +294,8 @@ impl State {
                 )
             }),
         ];
+        self.conflicts.remove(&path);
+        *self.mark_gen.entry(path.clone()).or_default() += 1;
         let mut before = old;
         for (rating, after) in edits.into_iter().flatten() {
             let change = if rating {
@@ -358,6 +370,7 @@ impl State {
         if let Some(idx) = self.items.iter().position(|i| i.primary.path == edit.path) {
             self.go_to(idx, fx);
         }
+        *self.mark_gen.entry(edit.path.clone()).or_default() += 1;
         let m = self.marks.entry(edit.path.clone()).or_default();
         if rating {
             m.rating = target.rating;
@@ -469,6 +482,19 @@ pub enum Action {
         size: (u32, u32),
         full_size: (u32, u32),
     },
+    /// A sidecar changed on disk, not by Blink (FILE-8). `conflict`: Blink had unsaved changes
+    /// for it and dropped them.
+    SidecarChanged {
+        sidecar: PathBuf,
+        conflict: bool,
+    },
+    /// Result of [`Effect::ReloadMarks`]: the item's marks as now on disk.
+    MarksReloaded {
+        key: PathBuf,
+        marks: Option<Marks>,
+        conflict: bool,
+        generation: u64,
+    },
     /// Writing the sidecar of `source` failed (FILE-6); the change stays queued for a retry.
     SidecarWriteFailed {
         source: PathBuf,
@@ -508,6 +534,14 @@ pub enum Effect {
         prefetch: Vec<ItemRef>,
         ahead: Vec<ItemRef>,
     },
+    /// Read the marks of `item` again (its sidecar changed on disk, FILE-8) and answer with
+    /// [`Action::MarksReloaded`].
+    ReloadMarks {
+        item: Item,
+        conflict: bool,
+        /// The item's [`State::mark_gen`] when the reload was asked for.
+        generation: u64,
+    },
     /// Load the full-resolution image of `item`: its paired JPEG if any, else a RAW decode.
     LoadFull {
         item: ItemRef,
@@ -536,6 +570,37 @@ fn stem_of(p: &std::path::Path) -> (Option<&std::path::Path>, String) {
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default(),
     )
+}
+
+/// The same file on a case-insensitive file system: same folder (compared as paths, so either
+/// separator works), file names equal ignoring ASCII case.
+pub fn same_name_ci(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.parent() == b.parent()
+        && match (a.file_name(), b.file_name()) {
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+            _ => false,
+        }
+}
+
+/// Whether `sidecar` is one of the sidecars `items[item]` writes or reads (FILE-4 names, any
+/// case).
+fn item_has_sidecar(items: &[Item], item: usize, sidecar: &std::path::Path) -> bool {
+    let eq = |p: &std::path::Path| same_name_ci(p, sidecar);
+    sidecar_writes(items, item, &MarkChange::RevertLabel)
+        .iter()
+        .any(|e| match e {
+            Effect::WriteSidecar {
+                source,
+                owns_adobe_name,
+                ..
+            } => {
+                let mut dt = source.as_os_str().to_os_string();
+                dt.push(".xmp");
+                eq(std::path::Path::new(&dt))
+                    || (*owns_adobe_name && eq(&source.with_extension("xmp")))
+            }
+            _ => false,
+        })
 }
 
 /// One [`Effect::WriteSidecar`] per member of `items[item]` (OPEN-2).
@@ -572,6 +637,8 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             // Undo history is per folder: its items are gone (ADR 0016).
             s.undo.clear();
             s.redo.clear();
+            s.conflicts.clear();
+            s.mark_gen.clear();
             fx.push(Effect::ScanFolder {
                 folder,
                 recursive: s.recursive,
@@ -701,6 +768,53 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     }
                 }
             }
+        }
+        Action::SidecarChanged { sidecar, conflict } => {
+            for i in 0..s.items.len() {
+                if item_has_sidecar(&s.items, i, &sidecar) {
+                    let key = &s.items[i].primary.path;
+                    fx.push(Effect::ReloadMarks {
+                        item: s.items[i].clone(),
+                        conflict,
+                        generation: s.mark_gen.get(key).copied().unwrap_or(0),
+                    });
+                }
+            }
+        }
+        Action::MarksReloaded {
+            key,
+            marks,
+            conflict,
+            generation,
+        } if s.mark_gen.get(&key).copied().unwrap_or(0) != generation => {
+            // The user marked the item after the reload was asked for: their change is newer
+            // than what was read, and the writer applies it to the new disk version.
+            let _ = (marks, conflict);
+        }
+        Action::MarksReloaded {
+            key,
+            marks,
+            conflict,
+            ..
+        } => {
+            s.marks.insert(key.clone(), marks.unwrap_or_default());
+            // Older edits of this item would undo over the other app's change.
+            s.undo.retain(|e| e.path != key);
+            s.redo.retain(|e| e.path != key);
+            let name = key
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let msg = if conflict {
+                s.conflicts.insert(key);
+                format!(
+                    "Sidecar of {name} changed on disk; kept the on-disk version, dropped Blink's unsaved change"
+                )
+            } else {
+                format!("Sidecar of {name} changed on disk; reloaded")
+            };
+            s.log.push(msg.clone());
+            s.toast = Some(msg);
         }
         Action::SidecarWriteFailed { source, error } => {
             let name = source
@@ -1500,5 +1614,48 @@ mod tests {
         );
         let (_, fx) = reduce(&s, Action::Undo);
         assert_eq!(writes(&fx), [("/f/b.ARW".into(), MarkChange::RevertRating)]);
+    }
+
+    #[test]
+    fn req_file_8_a_reload_read_before_a_newer_mark_is_ignored() {
+        let s = opened(&["a.ARW"]);
+        let (s, fx) = reduce(
+            &s,
+            Action::SidecarChanged {
+                sidecar: "/f/a.xmp".into(),
+                conflict: true,
+            },
+        );
+        let Some(Effect::ReloadMarks { generation, .. }) = fx.first().cloned() else {
+            panic!("{fx:?}")
+        };
+        let disk = Marks {
+            rating: Some(2),
+            label: None,
+        };
+        let reloaded = |generation| Action::MarksReloaded {
+            key: "/f/a.ARW".into(),
+            marks: Some(disk.clone()),
+            conflict: true,
+            generation,
+        };
+        // In time: the disk version is shown with a conflict marker.
+        let (r, _) = reduce(&s, reloaded(generation));
+        assert_eq!(rating_of(&r, "/f/a.ARW"), Some(2));
+        assert!(r.conflicts.contains(Path::new("/f/a.ARW")));
+        // The user rated meanwhile: the older reload doesn't override it.
+        let (s, _) = reduce(&s, Action::Mark(MarkKey::Stars(5)));
+        let (s, _) = reduce(&s, reloaded(generation));
+        assert_eq!(rating_of(&s, "/f/a.ARW"), Some(5));
+        assert!(s.conflicts.is_empty());
+        assert_eq!(s.undo.len(), 1);
+    }
+
+    #[test]
+    fn req_file_8_sidecar_names_match_across_separators_and_case() {
+        let joined = Path::new("/f").join("a.ARW.xmp");
+        assert!(same_name_ci(&joined, Path::new("/f/a.arw.XMP")));
+        assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/g/a.xmp")));
+        assert!(!same_name_ci(Path::new("/f/a.xmp"), Path::new("/f/b.xmp")));
     }
 }
