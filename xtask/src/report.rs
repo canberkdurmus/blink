@@ -78,6 +78,19 @@ pub fn run(milestone: &str) -> Result {
         let _ = writeln!(w, "**No bench results found** for {perf_ids:?}.\n");
     }
 
+    let _ = writeln!(w, "## Safety log\n");
+    match std::fs::read_to_string(crate::safety::summary_path()) {
+        Ok(s) => {
+            let _ = writeln!(
+                w,
+                "From the last `cargo xtask verify --full` on this machine:\n\n{s}"
+            );
+        }
+        Err(_) => {
+            let _ = writeln!(w, "No safety log: run `cargo xtask verify --full` first.\n");
+        }
+    }
+
     let _ = writeln!(w, "## Screenshots\n");
     let _ = writeln!(
         w,
