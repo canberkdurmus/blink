@@ -45,7 +45,10 @@ impl BlinkApp {
         let tier = self.tier();
         let n = self.state.visible.len();
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.state.visible.hash(&mut h);
+        // The items, not their positions: a rename keeps the count and positions (OPEN-3).
+        for &i in &self.state.visible {
+            self.state.items[i].primary.path.hash(&mut h);
+        }
         self.state.folder.hash(&mut h);
         let key = (range.start, range.end, tier, h.finish());
         if self.grid.asked == Some(key) {

@@ -44,19 +44,24 @@ pub fn downscale(img: &RgbImage, max_edge: u32) -> RgbImage {
     let (w, h) = ((img.width / f).max(1), (img.height / f).max(1));
     let mut out = vec![0u8; w as usize * h as usize * 3];
     let stride = img.width as usize * 3;
+    let f = f as usize;
+    let (iw, ih) = (img.width as usize, img.height as usize);
     for y in 0..h as usize {
+        // A side shorter than `f` (a panorama strip) averages the rows or columns it has.
+        let rows = y * f..((y + 1) * f).min(ih);
         for x in 0..w as usize {
+            let cols = x * f..((x + 1) * f).min(iw);
             let mut sum = [0u32; 3];
-            for dy in 0..f as usize {
-                let row = (y * f as usize + dy) * stride;
-                for dx in 0..f as usize {
-                    let i = row + (x * f as usize + dx) * 3;
+            for yy in rows.clone() {
+                let row = yy * stride;
+                for xx in cols.clone() {
+                    let i = row + xx * 3;
                     for c in 0..3 {
                         sum[c] += u32::from(img.data[i + c]);
                     }
                 }
             }
-            let n = f * f;
+            let n = (rows.len() * cols.len()) as u32;
             let o = (y * w as usize + x) * 3;
             for c in 0..3 {
                 out[o + c] = ((sum[c] + n / 2) / n) as u8;
@@ -196,6 +201,21 @@ mod tests {
         assert_eq!((s.width, s.height), (2, 1));
         assert!(s.data.iter().all(|&v| v == 128), "{:?}", s.data);
         assert_eq!(downscale(&img, 10), img);
+    }
+
+    #[test]
+    fn req_view_5_downscale_of_a_strip_thinner_than_the_block_never_reads_past_the_image() {
+        for (w, h) in [(1000, 2), (2, 1000), (30000, 150), (193, 1)] {
+            let img = RgbImage {
+                width: w,
+                height: h,
+                data: vec![90; (w * h * 3) as usize],
+            };
+            let s = downscale(&img, 192);
+            assert!(s.width.max(s.height) <= 192, "{w}×{h} → {}×{}", s.width, s.height);
+            assert!(s.width >= 1 && s.height >= 1);
+            assert!(s.data.iter().all(|&v| v == 90), "{w}×{h}");
+        }
     }
 
     #[test]

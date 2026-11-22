@@ -170,7 +170,11 @@ fn worker(s: &Shared) {
                 g = s.cv.wait(g).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let thumb = make(s.fs.as_ref(), &item, tier);
+        // A decoder panic costs this file its thumbnail, never the worker (or `running`).
+        let thumb = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            make(s.fs.as_ref(), &item, tier)
+        }))
+        .unwrap_or(Thumb { preview: None });
         let mut g = lock(&s.inner);
         let k = (item.path.clone(), tier);
         g.running.remove(&k);

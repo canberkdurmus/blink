@@ -1009,3 +1009,33 @@ fn req_view_5_g_shows_the_grid_cells_select_arrows_move_by_rows_and_enter_return
     h.step();
     assert!(!h.state().state().filmstrip);
 }
+
+#[test]
+fn req_view_5_req_open_3_a_file_renamed_while_the_grid_is_open_gets_its_thumbnail() {
+    let fs = Arc::new(folder(3));
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    h.key_press(egui::Key::G);
+    step_until(&mut h, "grid thumbnails", |a| a.grid_visible_drawn());
+    // Same count, same positions, another path.
+    let bytes = fs.remove_externally("/f/IMG_0001.ARW").unwrap();
+    fs.add_file("/f/IMG_0001a.ARW", bytes);
+    h.state().folder_changed();
+    within_1s(&mut h, "renamed file", |a| {
+        item_names(a).contains(&"IMG_0001a.ARW".to_string())
+    });
+    step_until(&mut h, "the renamed file's thumbnail", |a| {
+        a.grid_visible_drawn() && a.thumbs_done().0 == 3
+    });
+}
