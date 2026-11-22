@@ -364,7 +364,8 @@ fn desc_of(
         ));
     }
     let raw = e.attributes_raw();
-    let ws = raw.len() - raw.trim_start().len();
+    // XML whitespace only: `trim_start` would also take e.g. `\v`, which then joins a name.
+    let ws = raw.len() - raw.trim_start_matches([' ', '\t', '\r', '\n']).len();
     let sep = if ws == 0 {
         " ".to_string()
     } else {
