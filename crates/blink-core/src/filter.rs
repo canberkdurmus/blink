@@ -138,6 +138,6 @@ mod tests {
                 .matches(&item(FileKind::Heif), None, 1)
         );
         assert!(Filter::parse("rating>=9").is_err());
-        assert!(Filter::parse("lens=x").is_err());
+        assert!(Filter::parse("shutter=x").is_err());
     }
 }
