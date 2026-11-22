@@ -122,6 +122,9 @@ fn next_job(jobs: &mut VecDeque<Job>, settled_current: Option<&Path>) -> Option<
     jobs.remove(at)
 }
 
+/// Why an image wasn't cached (PERF-8).
+const TOO_LARGE: &str = "image larger than the whole decode cache; raise cache_mb";
+
 /// Default L2 cache cap (PERF-8): 2 GB.
 pub const DEFAULT_CACHE_BYTES: usize = 2 << 30;
 
@@ -199,6 +202,10 @@ impl<T> Cache<T> {
     /// image is cached (the full one supersedes it), then, if `v` alone can't fit, `v` itself
     /// is not kept. Returns whether `v` was kept.
     fn insert(&mut self, v: Arc<Loaded<T>>, pinned: &[Key]) -> bool {
+        if v.bytes() > self.cap {
+            // Can never fit: evict nothing for it.
+            return false;
+        }
         self.tick += 1;
         let k = (v.path.clone(), v.level);
         if let Some((old, _)) = self.map.remove(&k) {
@@ -551,9 +558,7 @@ fn worker<T>(s: &Shared<T>) {
                     let mut c = lock(&s.cache);
                     let fresh = job.epoch == s.epoch.load(Ordering::SeqCst);
                     if fresh && !c.insert(Arc::new(l), &pinned) {
-                        eprintln!(
-                            "blink: an image is larger than the whole decode cache; raise cache_mb"
-                        );
+                        eprintln!("blink: {TOO_LARGE}");
                     }
                     fresh
                 };
@@ -715,14 +720,22 @@ fn full_worker<T>(s: &Shared<T>) {
         }
         match result {
             Ok(l) => {
-                let a = l.ready();
-                if !c.insert(Arc::new(l), &pinned) {
-                    eprintln!(
-                        "blink: an image is larger than the whole decode cache; raise cache_mb"
+                let (a, path) = (l.ready(), l.path.clone());
+                let kept = c.insert(Arc::new(l), &pinned);
+                drop(c);
+                if kept {
+                    send(s, a);
+                } else {
+                    // The preview stays drawn; the toast says why the zoom can't sharpen.
+                    send(
+                        s,
+                        Action::ImageFailed {
+                            path,
+                            level: Level::Full,
+                            error: TOO_LARGE.into(),
+                        },
                     );
                 }
-                drop(c);
-                send(s, a);
             }
             Err(error) => send(
                 s,
@@ -963,6 +976,13 @@ mod cache_tests {
         // Larger than the whole cache: not kept, the cap holds.
         assert!(!c.insert(loaded(2, Level::Full, 101), &pinned));
         assert!(c.bytes <= c.cap);
+        // The current item's own full image too large: its preview stays, nothing is evicted.
+        let mut c = cache(700);
+        assert!(c.insert(loaded(1, Level::Preview, 30), &pinned));
+        assert!(c.insert(loaded(0, Level::Preview, 40), &pinned));
+        assert!(!c.insert(loaded(0, Level::Full, 101), &pinned));
+        assert_eq!(c.map.len(), 2);
+        assert!(c.map.contains_key(&cur));
     }
 
     proptest! {

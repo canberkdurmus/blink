@@ -15,8 +15,12 @@ small cap, or a huge full decode, the total could go over.
   supersedes it). If the entry still doesn't fit, it is not cached (logged; only an image
   larger than the whole cache). So `bytes ≤ cap` holds after every insert. A proptest checks
   this over random inserts and pins.
-- Config `cache_mb` (MiB, 512 – 1 TiB; default 2048 = `DEFAULT_CACHE_BYTES`). 512 MiB keeps
-  the preview and full decode of a 100 MP RAW (7 bytes per pixel in the cache's accounting).
+- Config `cache_mb` (MiB, 1024 – 1 TiB; default 2048 = `DEFAULT_CACHE_BYTES`). 1024 MiB keeps
+  the preview and the full decode of a 100 MP RAW (7 bytes per pixel in the cache's accounting:
+  ~700 MB plus the preview).
+- An image larger than the whole cache evicts nothing. A full decode that can't be cached is
+  reported as `ImageFailed` ("raise cache_mb"), so the preview stays drawn and the toast says
+  why.
 - Soak: `cargo xtask soak --minutes N` runs `full_soak::req_perf_8_soak_…`. That test sends
   random navigation, marks, zoom, filters and undo to the headless app, with a 9 MiB cap over
   40 images, and asserts the cap on every frame. It prints its seed. Nightly runs 10 minutes.

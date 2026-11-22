@@ -6,7 +6,7 @@
 //! auto_advance = false
 //! sidecar_style = "adobe" # or "darktable"
 //! rejects = "folder"      # apply rejects: "_rejected/" folder, or "trash" (FILE-1)
-//! cache_mb = 2048       # decode cache cap in MiB (PERF-8), at least 512
+//! cache_mb = 2048       # decode cache cap in MiB (PERF-8), at least 1024
 //! [[open_with]]          # FILE-3; replaces the default list when present
 //! name = "ART"
 //! command = ["ART", "{file}"]   # program, then arguments; {file} is the item's path
@@ -24,8 +24,9 @@ use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::state::{LabelColor, MarkPrefs};
 use std::path::Path;
 
-/// Smallest decode cache: two levels of the largest RAW still fit (PERF-8).
-pub const MIN_CACHE_MB: i64 = 512;
+/// Smallest decode cache: the preview and full decode of a 100 MP RAW (~700 MB at 7 bytes
+/// per pixel in the cache's accounting) still fit (PERF-8).
+pub const MIN_CACHE_MB: i64 = 1024;
 /// Largest decode cache accepted (1 TiB), so the byte count can't overflow.
 pub const MAX_CACHE_MB: i64 = 1 << 20;
 
@@ -196,11 +197,11 @@ mod tests {
         let (c, errs) = Config::parse("cache_mb = 4096");
         assert_eq!((c.cache_bytes, errs.len()), (Some(4 << 30), 0));
         assert_eq!(
-            Config::parse("cache_mb = 512").0.cache_bytes,
-            Some(512 << 20)
+            Config::parse("cache_mb = 1024").0.cache_bytes,
+            Some(1 << 30)
         );
         for bad in [
-            "cache_mb = 511",
+            "cache_mb = 1023",
             "cache_mb = \"2G\"",
             "cache_mb = 1.5",
             "cache_mb = -1",
