@@ -156,12 +156,17 @@ impl Fs for RealFs {
     }
 
     fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        f.write_all(bytes)
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            f.write_all(bytes)
+        })();
+        crate::safety::log("write_new", path, &r);
+        r
     }
 
     fn sync_file(&self, path: &Path) -> io::Result<()> {
@@ -173,10 +178,15 @@ impl Fs for RealFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        // Unix: rename(2), atomic replace. Windows: std uses FileRenameInfoEx with
-        // FILE_RENAME_FLAG_REPLACE_IF_EXISTS (MoveFileExW with MOVEFILE_REPLACE_EXISTING on old
-        // systems), an atomic replace like ReplaceFileW (ADR 0015).
-        std::fs::rename(from, to)
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            // Unix: rename(2), atomic replace. Windows: std uses FileRenameInfoEx with
+            // FILE_RENAME_FLAG_REPLACE_IF_EXISTS (MoveFileExW with MOVEFILE_REPLACE_EXISTING on old
+            // systems), an atomic replace like ReplaceFileW (ADR 0015).
+            std::fs::rename(from, to)
+        })();
+        crate::safety::log("rename", to, &r);
+        r
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
@@ -193,10 +203,15 @@ impl Fs for RealFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        if !crate::atomic::may_remove(path) {
-            return Err(refuse_unlink(path));
-        }
-        std::fs::remove_file(path)
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            if !crate::atomic::may_remove(path) {
+                return Err(refuse_unlink(path));
+            }
+            std::fs::remove_file(path)
+        })();
+        crate::safety::log("remove_file", path, &r);
+        r
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {
@@ -204,55 +219,70 @@ impl Fs for RealFs {
     }
 
     fn move_file(&self, from: &Path, to: &Path) -> io::Result<()> {
-        // Check, then rename: another program creating `to` in between would be replaced. Blink
-        // never does; ADR 0021 accepts the window (no portable no-replace rename in std).
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                to.display().to_string(),
-            ));
-        }
-        std::fs::rename(from, to)
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            // Check, then rename: another program creating `to` in between would be replaced. Blink
+            // never does; ADR 0021 accepts the window (no portable no-replace rename in std).
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    to.display().to_string(),
+                ));
+            }
+            std::fs::rename(from, to)
+        })();
+        crate::safety::log("move_file", from, &r);
+        r
     }
 
     fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                to.display().to_string(),
-            ));
-        }
-        // Into a temp file next to `to`, made durable, then moved into place: a crash or a full
-        // disk never leaves a partial copy under the real name.
-        let tmp = crate::atomic::temp_path(to);
-        let copied = (|| {
-            let mut src = std::fs::File::open(from)?;
-            let mut dst = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            std::io::copy(&mut src, &mut dst)?;
-            dst.sync_all()
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    to.display().to_string(),
+                ));
+            }
+            // Into a temp file next to `to`, made durable, then moved into place: a crash or a full
+            // disk never leaves a partial copy under the real name.
+            let tmp = crate::atomic::temp_path(to);
+            let copied = (|| {
+                let mut src = std::fs::File::open(from)?;
+                let mut dst = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp)?;
+                std::io::copy(&mut src, &mut dst)?;
+                dst.sync_all()
+            })();
+            let placed = copied.and_then(|()| self.move_file(&tmp, to));
+            if placed.is_err() {
+                let _ = self.remove_file(&tmp);
+            }
+            placed
         })();
-        let placed = copied.and_then(|()| self.move_file(&tmp, to));
-        if placed.is_err() {
-            let _ = self.remove_file(&tmp);
-        }
-        placed
+        crate::safety::log("copy_file", to, &r);
+        r
     }
 
     fn trash(&self, path: &Path) -> io::Result<()> {
-        trash_moves_without_copying(path)?;
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-        let mut ctx = trash::TrashContext::default();
-        #[cfg(target_os = "macos")]
-        {
-            // NSFileManager: no Finder automation prompt, no sound (ADR 0021).
-            use trash::macos::{DeleteMethod, TrashContextExtMacos};
-            ctx.set_delete_method(DeleteMethod::NsFileManager);
-        }
-        ctx.delete(path)
-            .map_err(|e| io::Error::other(e.to_string()))
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            trash_moves_without_copying(path)?;
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+            let mut ctx = trash::TrashContext::default();
+            #[cfg(target_os = "macos")]
+            {
+                // NSFileManager: no Finder automation prompt, no sound (ADR 0021).
+                use trash::macos::{DeleteMethod, TrashContextExtMacos};
+                ctx.set_delete_method(DeleteMethod::NsFileManager);
+            }
+            ctx.delete(path)
+                .map_err(|e| io::Error::other(e.to_string()))
+        })();
+        crate::safety::log("trash", path, &r);
+        r
     }
 }
 
@@ -629,25 +659,30 @@ impl Fs for MemFs {
     }
 
     fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let torn = self.write_step(FsCall::WriteNew(path.to_path_buf()));
-        if lock(&self.files).contains_key(path) || lock(&self.dirs).contains_key(path) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                path.display().to_string(),
-            ));
-        }
-        if !self.dir_exists(path) {
-            return Err(not_found(path));
-        }
-        let data = match &torn {
-            Ok(()) => bytes.to_vec(),
-            Err(_) => bytes[..bytes.len() / 2].to_vec(),
-        };
-        lock(&self.files).insert(path.to_path_buf(), data);
-        let mut f = lock(&self.faults);
-        f.unsynced.insert(path.to_path_buf());
-        f.pending.push(Pending::Created(path.to_path_buf()));
-        torn
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            let torn = self.write_step(FsCall::WriteNew(path.to_path_buf()));
+            if lock(&self.files).contains_key(path) || lock(&self.dirs).contains_key(path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    path.display().to_string(),
+                ));
+            }
+            if !self.dir_exists(path) {
+                return Err(not_found(path));
+            }
+            let data = match &torn {
+                Ok(()) => bytes.to_vec(),
+                Err(_) => bytes[..bytes.len() / 2].to_vec(),
+            };
+            lock(&self.files).insert(path.to_path_buf(), data);
+            let mut f = lock(&self.faults);
+            f.unsynced.insert(path.to_path_buf());
+            f.pending.push(Pending::Created(path.to_path_buf()));
+            torn
+        })();
+        crate::safety::log("write_new", path, &r);
+        r
     }
 
     fn sync_file(&self, path: &Path) -> io::Result<()> {
@@ -660,35 +695,40 @@ impl Fs for MemFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.write_step(FsCall::Rename(from.to_path_buf(), to.to_path_buf()))?;
-        if lock(&self.dirs).contains_key(to) || !self.dir_exists(to) {
-            return Err(io::Error::other(format!(
-                "cannot rename to {}",
-                to.display()
-            )));
-        }
-        let mut files = lock(&self.files);
-        let bytes = files.remove(from).ok_or_else(|| not_found(from))?;
-        let to_before = files.insert(to.to_path_buf(), bytes);
-        drop(files);
-        let mut f = lock(&self.faults);
-        let to_before_unsynced = f.unsynced.remove(to);
-        if f.unsynced.remove(from) {
-            f.unsynced.insert(to.to_path_buf());
-        }
-        f.pending.push(Pending::Renamed {
-            from: from.to_path_buf(),
-            to: to.to_path_buf(),
-            to_before,
-            to_before_unsynced,
-        });
-        drop(f);
-        let mut m = lock(&self.mtimes);
-        match m.remove(from) {
-            Some(t) => m.insert(to.to_path_buf(), t),
-            None => m.remove(to),
-        };
-        Ok(())
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            self.write_step(FsCall::Rename(from.to_path_buf(), to.to_path_buf()))?;
+            if lock(&self.dirs).contains_key(to) || !self.dir_exists(to) {
+                return Err(io::Error::other(format!(
+                    "cannot rename to {}",
+                    to.display()
+                )));
+            }
+            let mut files = lock(&self.files);
+            let bytes = files.remove(from).ok_or_else(|| not_found(from))?;
+            let to_before = files.insert(to.to_path_buf(), bytes);
+            drop(files);
+            let mut f = lock(&self.faults);
+            let to_before_unsynced = f.unsynced.remove(to);
+            if f.unsynced.remove(from) {
+                f.unsynced.insert(to.to_path_buf());
+            }
+            f.pending.push(Pending::Renamed {
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                to_before,
+                to_before_unsynced,
+            });
+            drop(f);
+            let mut m = lock(&self.mtimes);
+            match m.remove(from) {
+                Some(t) => m.insert(to.to_path_buf(), t),
+                None => m.remove(to),
+            };
+            Ok(())
+        })();
+        crate::safety::log("rename", to, &r);
+        r
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
@@ -698,24 +738,29 @@ impl Fs for MemFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        // Every test runs on this file system: unlinking a source file fails the test (FILE-1).
-        assert!(
-            crate::atomic::may_remove(path),
-            "FILE-1 violation: unlink of a source file {}",
-            path.display()
-        );
-        self.write_step(FsCall::RemoveFile(path.to_path_buf()))?;
-        let bytes = lock(&self.files)
-            .remove(path)
-            .ok_or_else(|| not_found(path))?;
-        lock(&self.mtimes).remove(path);
-        let mut f = lock(&self.faults);
-        f.unsynced.remove(path);
-        f.pending.push(Pending::Removed {
-            path: path.to_path_buf(),
-            bytes,
-        });
-        Ok(())
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            // Every test runs on this file system: unlinking a source file fails the test (FILE-1).
+            assert!(
+                crate::atomic::may_remove(path),
+                "FILE-1 violation: unlink of a source file {}",
+                path.display()
+            );
+            self.write_step(FsCall::RemoveFile(path.to_path_buf()))?;
+            let bytes = lock(&self.files)
+                .remove(path)
+                .ok_or_else(|| not_found(path))?;
+            lock(&self.mtimes).remove(path);
+            let mut f = lock(&self.faults);
+            f.unsynced.remove(path);
+            f.pending.push(Pending::Removed {
+                path: path.to_path_buf(),
+                bytes,
+            });
+            Ok(())
+        })();
+        crate::safety::log("remove_file", path, &r);
+        r
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {
@@ -734,52 +779,67 @@ impl Fs for MemFs {
     }
 
     fn move_file(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.write_step(FsCall::MoveFile(from.to_path_buf(), to.to_path_buf()))?;
-        if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                to.display().to_string(),
-            ));
-        }
-        if !self.dir_exists(to) {
-            return Err(not_found(to));
-        }
-        let bytes = lock(&self.files)
-            .remove(from)
-            .ok_or_else(|| not_found(from))?;
-        lock(&self.files).insert(to.to_path_buf(), bytes);
-        let mut m = lock(&self.mtimes);
-        if let Some(t) = m.remove(from) {
-            m.insert(to.to_path_buf(), t);
-        }
-        Ok(())
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            self.write_step(FsCall::MoveFile(from.to_path_buf(), to.to_path_buf()))?;
+            if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    to.display().to_string(),
+                ));
+            }
+            if !self.dir_exists(to) {
+                return Err(not_found(to));
+            }
+            let bytes = lock(&self.files)
+                .remove(from)
+                .ok_or_else(|| not_found(from))?;
+            lock(&self.files).insert(to.to_path_buf(), bytes);
+            let mut m = lock(&self.mtimes);
+            if let Some(t) = m.remove(from) {
+                m.insert(to.to_path_buf(), t);
+            }
+            Ok(())
+        })();
+        crate::safety::log("move_file", from, &r);
+        r
     }
 
     fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.write_step(FsCall::CopyFile(from.to_path_buf(), to.to_path_buf()))?;
-        if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                to.display().to_string(),
-            ));
-        }
-        if !self.dir_exists(to) {
-            return Err(not_found(to));
-        }
-        let bytes = lock(&self.files)
-            .get(from)
-            .cloned()
-            .ok_or_else(|| not_found(from))?;
-        lock(&self.files).insert(to.to_path_buf(), bytes);
-        Ok(())
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            self.write_step(FsCall::CopyFile(from.to_path_buf(), to.to_path_buf()))?;
+            if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    to.display().to_string(),
+                ));
+            }
+            if !self.dir_exists(to) {
+                return Err(not_found(to));
+            }
+            let bytes = lock(&self.files)
+                .get(from)
+                .cloned()
+                .ok_or_else(|| not_found(from))?;
+            lock(&self.files).insert(to.to_path_buf(), bytes);
+            Ok(())
+        })();
+        crate::safety::log("copy_file", to, &r);
+        r
     }
 
     fn trash(&self, path: &Path) -> io::Result<()> {
-        self.write_step(FsCall::Trash(path.to_path_buf()))?;
-        lock(&self.files)
-            .remove(path)
-            .map(|_| ())
-            .ok_or_else(|| not_found(path))
+        #[allow(clippy::redundant_closure_call)]
+        let r = (|| -> io::Result<()> {
+            self.write_step(FsCall::Trash(path.to_path_buf()))?;
+            lock(&self.files)
+                .remove(path)
+                .map(|_| ())
+                .ok_or_else(|| not_found(path))
+        })();
+        crate::safety::log("trash", path, &r);
+        r
     }
 }
 

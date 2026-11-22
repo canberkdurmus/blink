@@ -2,6 +2,7 @@
 //!
 //! Commands:
 //! - `verify [--full]`   fast tier (fmt, clippy, nextest, trace); `--full` adds the full-tier tests
+//!   and the safety log (no source-file writes across the suite, `target/safety-log.md`)
 //! - `trace [--gate Mn]` requirement coverage from SPEC.md, PROGRESS.md and nextest JUnit output
 //! - `corpus fetch`      download and verify the test corpus
 //! - `fixtures`          write synthetic fixtures to `corpus/synthetic/`
@@ -16,6 +17,7 @@ mod fixtures;
 mod guard;
 mod interop;
 mod report;
+mod safety;
 mod spec;
 mod trace;
 
@@ -107,6 +109,22 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result {
     }
 }
 
+/// [`run_cmd`] with extra environment variables.
+pub fn run_cmd_env(program: &str, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Result {
+    eprintln!("$ {program} {}", args.join(" "));
+    let status = Command::new(program)
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("failed to start {program}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`{program} {}` failed ({status})", args.join(" ")))
+    }
+}
+
 /// Run a command and capture stdout.
 pub fn capture(program: &str, args: &[&str]) -> Result<String> {
     let out = Command::new(program)
@@ -155,8 +173,17 @@ fn verify(full: bool) -> Result {
     let not_full = format!("not {FULL_FILTER}");
     if !full {
         args.extend(["-E", not_full.as_str()]);
+        run_cmd(&cargo, &args)?;
+    } else {
+        // The full tier also writes the safety log (M4 gate): every write call of every test.
+        safety::reset()?;
+        run_cmd_env(
+            &cargo,
+            &args,
+            &[("BLINK_SAFETY_LOG", safety::dir().as_os_str())],
+        )?;
+        safety::check()?;
     }
-    run_cmd(&cargo, &args)?;
     trace::run(
         if full {
             trace::Mode::Full
