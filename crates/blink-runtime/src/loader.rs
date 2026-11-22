@@ -47,6 +47,8 @@ struct Pace {
     interval: Option<f64>,
     /// Smoothed seconds per preview job (read, decode, prepare).
     latency: Option<f64>,
+    /// Smoothed seconds per whole-file read through [`Fs`] (PERF-9).
+    read: Option<f64>,
 }
 
 fn smooth(old: Option<f64>, new: f64) -> f64 {
@@ -88,6 +90,26 @@ fn lead(interval: Option<f64>, latency: Option<f64>, ahead: usize) -> usize {
     match (interval, latency) {
         (Some(i), Some(l)) if i > 0.0 && l > i => ((l / i).ceil() as usize).min(ahead),
         _ => 0,
+    }
+}
+
+/// How far ahead in time the prefetch window may keep the storage busy (PERF-9, ADR 0027).
+const HORIZON_SECS: f64 = 2.0;
+
+/// The prefetch window never shrinks below its first item ahead and first item behind.
+const MIN_WINDOW: usize = 2;
+
+/// How many of a `len`-item prefetch window (in priority order) to load (PERF-9): as many as
+/// the measured reads bring in within [`HORIZON_SECS`], `workers` reads at a time. A read can't
+/// be cancelled halfway, so on slow storage (USB, network) prefetching further only delays the
+/// item the user moves to next. Fast storage, or nothing measured yet, keeps the whole window.
+fn window_len(read_secs: Option<f64>, workers: usize, len: usize) -> usize {
+    match read_secs {
+        Some(r) if r > 0.0 => {
+            let fit = (HORIZON_SECS * workers.max(1) as f64 / r).floor();
+            (fit.min(len as f64) as usize).max(MIN_WINDOW.min(len))
+        }
+        _ => len,
     }
 }
 
@@ -260,6 +282,8 @@ struct Shared<T> {
     cache: Mutex<Cache<T>>,
     generation: AtomicU64,
     pace: Mutex<Pace>,
+    /// Number of decode workers (reads in flight at once).
+    workers: usize,
     /// Bumped by [`Loader::clear`]: results of jobs started before it are dropped.
     epoch: AtomicU64,
     /// Primary path of the current item (pinned in the cache, never cancelled).
@@ -325,6 +349,7 @@ impl<T: Send + Sync + 'static> Loader<T> {
             }),
             generation: AtomicU64::new(0),
             pace: Mutex::new(Pace::default()),
+            workers: workers.max(1),
             epoch: AtomicU64::new(0),
             current: Mutex::new(None),
             results: Mutex::new(tx),
@@ -368,11 +393,13 @@ impl<T: Send + Sync + 'static> Loader<T> {
         prefetch: &[ItemRef],
         ahead: &[ItemRef],
     ) -> Option<Action> {
-        let k = {
+        let (k, n) = {
             let mut p = lock(&self.shared.pace);
             p.shown(&current.path, ahead, std::time::Instant::now());
-            lead(p.interval, p.latency, ahead.len())
+            let n = window_len(p.read, self.shared.workers, prefetch.len());
+            (lead(p.interval, p.latency, ahead.len()), n)
         };
+        let prefetch = &prefetch[..n];
         let order = priority(current, prefetch, ahead, k);
         let g = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.shared.current) = Some(current.path.clone());
@@ -481,6 +508,8 @@ impl<T: Send + Sync + 'static> Loader<T> {
         drop(q);
         *lock(&self.shared.current) = None;
         lock(&self.shared.full).next = None;
+        // Another folder may be on other storage: measure it afresh (PERF-9).
+        lock(&self.shared.pace).read = None;
         let mut c = lock(&self.shared.cache);
         c.map.clear();
         c.bytes = 0;
@@ -632,8 +661,15 @@ fn finish_load<T>(
     }
 }
 
+/// Read a whole file, measuring the storage (PERF-9).
 fn read<T>(s: &Shared<T>, p: &Path) -> Result<Vec<u8>, String> {
-    s.fs.read(p).map_err(|e| format!("{}: {e}", p.display()))
+    let started = std::time::Instant::now();
+    let r = s.fs.read(p).map_err(|e| format!("{}: {e}", p.display()));
+    if r.is_ok() {
+        let mut pace = lock(&s.pace);
+        pace.read = Some(smooth(pace.read, started.elapsed().as_secs_f64()));
+    }
+    r
 }
 
 /// Outcome of a preview job: `None` = cancelled.
@@ -785,6 +821,23 @@ mod pace_tests {
             kind: FileKind::Raw,
             paired_jpeg: None,
         }
+    }
+
+    #[test]
+    fn req_perf_9_the_window_holds_what_the_measured_reads_bring_in_within_the_horizon() {
+        // Nothing measured yet, or fast storage: the whole window (SPEC §8.3).
+        assert_eq!(window_len(None, 4, 10), 10);
+        assert_eq!(window_len(Some(0.02), 4, 10), 10, "NVMe: 50 MB in 20 ms");
+        // A USB 2 disk, 50 MB RAWs, 2 workers: ~1.7 s per read, ~1.2 items/s.
+        assert_eq!(
+            window_len(Some(1.7), 2, 10),
+            2,
+            "never below 1 ahead, 1 behind"
+        );
+        assert_eq!(window_len(Some(1.0), 2, 10), 4);
+        assert_eq!(window_len(Some(0.5), 2, 10), 8);
+        assert_eq!(window_len(Some(9.0), 2, 1), 1, "never more than the window");
+        assert_eq!(window_len(Some(0.0), 2, 10), 10);
     }
 
     #[test]
