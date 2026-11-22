@@ -895,7 +895,15 @@ fn soak(secs: u64, seed: u64) {
         x ^= x << 17;
         x % n
     };
-    let (t, mut steps, mut peak) = (Instant::now(), 0u64, 0usize);
+    // Something must be cached before the random run: a slow runner may not finish a decode
+    // in a short soak otherwise.
+    let t = Instant::now();
+    while h.state().cache_usage().0 == 0 {
+        assert!(t.elapsed() < Duration::from_secs(30), "nothing was ever cached");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (t, mut steps, mut peak) = (Instant::now(), 0u64, h.state().cache_usage().0);
     while t.elapsed() < Duration::from_secs(secs) {
         let a = match rnd(12) {
             0..=3 => Action::Navigate(Nav::Next),
