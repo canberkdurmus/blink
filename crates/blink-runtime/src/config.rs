@@ -6,6 +6,9 @@
 //! auto_advance = false
 //! sidecar_style = "adobe" # or "darktable"
 //! rejects = "folder"      # apply rejects: "_rejected/" folder, or "trash" (FILE-1)
+//! [[open_with]]          # FILE-3; replaces the default list when present
+//! name = "ART"
+//! command = ["ART", "{file}"]   # program, then arguments; {file} is the item's path
 //! [labels]
 //! red = "Red"
 //! purple = "Purple"
@@ -16,6 +19,7 @@
 
 use crate::fs::Fs;
 use crate::sidecar::SidecarStyle;
+use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::state::{LabelColor, MarkPrefs};
 use std::path::Path;
 
@@ -27,6 +31,53 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub struct Config {
     pub marks: MarkPrefs,
     pub sidecar_style: SidecarStyle,
+    /// The "Open in" list (FILE-3); `None`: the defaults for this OS.
+    pub open_with: Option<Vec<ExternalApp>>,
+}
+
+impl Config {
+    /// The "Open in" list: configured, or the defaults for this OS.
+    pub fn external_apps(&self) -> Vec<ExternalApp> {
+        self.open_with
+            .clone()
+            .unwrap_or_else(|| default_apps(TargetOs::current()))
+    }
+}
+
+fn parse_open_with(v: &toml::Value, errs: &mut Vec<String>) -> Option<Vec<ExternalApp>> {
+    let Some(list) = v.as_array() else {
+        errs.push("open_with must be a list of [[open_with]] tables".into());
+        return None;
+    };
+    let mut apps = Vec::new();
+    for (i, e) in list.iter().enumerate() {
+        let n = i + 1;
+        let Some(t) = e.as_table() else {
+            errs.push(format!("open_with entry {n} must be a table"));
+            continue;
+        };
+        if let Some(k) = t.keys().find(|k| *k != "name" && *k != "command") {
+            errs.push(format!("unknown key open_with.{k} (entry {n})"));
+        }
+        let name = t.get("name").and_then(|v| v.as_str()).map(str::trim);
+        let command: Option<Vec<String>> = t
+            .get("command")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect());
+        match (name, command) {
+            (Some(name), Some(cmd)) if !name.is_empty() => {
+                match ExternalApp::from_command(name, &cmd) {
+                    Some(app) => apps.push(app),
+                    None => errs.push(format!("open_with entry {n}: command needs a program")),
+                }
+            }
+            _ => errs.push(format!(
+                "open_with entry {n} needs a name and a command list of strings"
+            )),
+        }
+    }
+    // Every entry broken: keep the defaults rather than an empty menu.
+    (!apps.is_empty()).then_some(apps)
 }
 
 const LABEL_KEYS: [&str; 5] = ["red", "yellow", "green", "blue", "purple"];
@@ -80,6 +131,7 @@ impl Config {
                     }
                 }
                 ("labels", _) => errs.push("labels must be a table".into()),
+                ("open_with", v) => c.open_with = parse_open_with(v, &mut errs),
                 (other, _) => errs.push(format!("unknown key {other}")),
             }
         }
@@ -120,6 +172,52 @@ impl Config {
 mod tests {
     use super::*;
     use crate::fs::MemFs;
+
+    #[test]
+    fn req_file_3_open_with_list_is_configurable_and_defaults_per_os() {
+        let (c, errs) = Config::parse("");
+        assert!(errs.is_empty());
+        assert_eq!(c.external_apps(), default_apps(TargetOs::current()));
+        let (c, errs) = Config::parse(
+            r#"
+[[open_with]]
+name = "ART"
+command = ["ART", "{file}"]
+[[open_with]]
+name = "Viewer"
+command = ["/usr/bin/viewer", "--fullscreen"]
+"#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        let apps = c.external_apps();
+        assert_eq!(
+            apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["ART", "Viewer"]
+        );
+        assert_eq!(apps[1].programs, ["/usr/bin/viewer"]);
+        assert_eq!(apps[1].args, ["--fullscreen"]);
+        for bad in [
+            "open_with = 3",
+            "[[open_with]]\nname = \"x\"",
+            "[[open_with]]\nname = \"x\"\ncommand = []",
+            "[[open_with]]\nname = \"x\"\ncommand = [1]",
+            "[[open_with]]\ncommand = [\"x\"]",
+        ] {
+            let (c, errs) = Config::parse(bad);
+            assert_eq!(
+                c.external_apps(),
+                default_apps(TargetOs::current()),
+                "{bad}"
+            );
+            assert_eq!(errs.len(), 1, "{bad}: {errs:?}");
+        }
+        // A broken entry is reported; the good ones are kept.
+        let (c, errs) = Config::parse(
+            "[[open_with]]\nname = \"a\"\ncommand = [\"a\"]\nextra = 1\n[[open_with]]\nname = \"b\"",
+        );
+        assert_eq!(c.external_apps().len(), 1);
+        assert_eq!(errs.len(), 2, "{errs:?}");
+    }
 
     #[test]
     fn req_rate_2_pick_value_is_configurable_1_to_5_and_defaults_to_1() {

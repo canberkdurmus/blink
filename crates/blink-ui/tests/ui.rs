@@ -621,3 +621,80 @@ fn req_file_2_copy_move_and_export_of_the_filtered_items_through_the_app() {
     assert!(fs.peek("/f/IMG_0001.ARW").is_none());
     assert!(fs.peek("/out/IMG_0001-1.ARW").is_some());
 }
+
+/// Records launches instead of starting processes; fails for programs named `missing`.
+#[derive(Default)]
+struct RecordingLauncher(std::sync::Mutex<Vec<blink_runtime::external::Launch>>);
+
+impl blink_runtime::external::Launcher for RecordingLauncher {
+    fn launch(&self, cmd: &blink_runtime::external::Launch) -> std::io::Result<()> {
+        self.0.lock().unwrap().push(cmd.clone());
+        if cmd.program == Path::new("missing") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such program",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn req_file_3_ctrl_shift_e_opens_the_current_item_in_the_first_external_app() {
+    use blink_core::external::ExternalApp;
+    use egui::{Key, Modifiers};
+    let launcher = Arc::new(RecordingLauncher::default());
+    let app = |name: &str, prog: &str, args: &[&str]| ExternalApp {
+        name: name.into(),
+        programs: vec![prog.into()],
+        args: args.iter().map(|s| s.to_string()).collect(),
+    };
+    let fs = Arc::new(folder(3));
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                external_apps: vec![
+                    app("Editor", "editor", &["--open", "{file}"]),
+                    app("Broken", "missing", &[]),
+                ],
+                launcher: launcher.clone(),
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    h.key_press(Key::ArrowRight);
+    settle(&mut h);
+    let current = h
+        .state()
+        .state()
+        .current_item()
+        .unwrap()
+        .primary
+        .path
+        .clone();
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::E);
+    step_until(&mut h, "launched", |a| {
+        a.state().toast.as_deref() == Some("Opened in Editor")
+    });
+    assert_eq!(
+        *launcher.0.lock().unwrap(),
+        [blink_runtime::external::Launch {
+            program: "editor".into(),
+            args: vec!["--open".into(), current.clone().into_os_string()],
+        }]
+    );
+    h.state_mut().open_external(1);
+    step_until(&mut h, "failed", |a| {
+        a.state()
+            .toast
+            .as_deref()
+            .is_some_and(|t| t.starts_with("Could not open in Broken"))
+    });
+    assert_eq!(launcher.0.lock().unwrap().len(), 2);
+}

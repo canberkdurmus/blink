@@ -792,6 +792,11 @@ pub enum Action {
         path: PathBuf,
         csv: bool,
     },
+    /// An external app was started on an item, or couldn't be (FILE-3).
+    ExternalAppLaunched {
+        app: String,
+        error: Option<String>,
+    },
     /// Result of [`Effect::WriteExport`].
     ExportWritten {
         path: PathBuf,
@@ -1325,6 +1330,15 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             let contents =
                 crate::export::item_list(s.visible_items(), &s.marks, s.prefs.pick_value, csv);
             fx.push(Effect::WriteExport { path, contents });
+        }
+        Action::ExternalAppLaunched { app, error } => {
+            s.toast = Some(match error {
+                None => format!("Opened in {app}"),
+                Some(e) => {
+                    s.log.push(format!("Could not open in {app}: {e}"));
+                    format!("Could not open in {app}: {e}")
+                }
+            });
         }
         Action::ExportWritten { path, error } => {
             let name = path.display();
@@ -2678,6 +2692,35 @@ mod tests {
         let s = done(&s, FileOpKind::Undo, vec![moves[1].clone()], vec![]);
         assert!(!s.file_op_running);
         assert!(s.undo.is_empty() && s.redo.is_empty());
+    }
+
+    #[test]
+    fn req_file_3_launch_results_show_in_the_toast_and_failures_are_logged() {
+        let s = opened(&["a.ARW"]);
+        let (s, fx) = reduce(
+            &s,
+            Action::ExternalAppLaunched {
+                app: "GIMP".into(),
+                error: None,
+            },
+        );
+        assert!(fx.is_empty());
+        assert_eq!(s.toast.as_deref(), Some("Opened in GIMP"));
+        let (s, _) = reduce(
+            &s,
+            Action::ExternalAppLaunched {
+                app: "GIMP".into(),
+                error: Some("not found".into()),
+            },
+        );
+        assert_eq!(
+            s.toast.as_deref(),
+            Some("Could not open in GIMP: not found")
+        );
+        assert_eq!(
+            s.log.last().map(String::as_str),
+            Some("Could not open in GIMP: not found")
+        );
     }
 
     #[test]

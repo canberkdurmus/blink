@@ -3,6 +3,7 @@
 //! clipping overlay and histogram (VIEW-6) and the info panel (VIEW-7).
 
 use crate::tiles::{self, Prepared, Tile};
+use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::filter::{Cond, Filter};
 use blink_core::formats::{FileKind, Formats};
 use blink_core::preview::PreviewSource;
@@ -12,6 +13,7 @@ use blink_core::state::{
 };
 use blink_core::view::Zoom;
 use blink_decode::raw::RawBackend;
+use blink_runtime::external::{Launcher, ProcessLauncher};
 use blink_runtime::fs::Fs;
 use blink_runtime::loader::{DEFAULT_CACHE_BYTES, Loaded, Loader, default_workers};
 use blink_runtime::sidecar::{SidecarEvent, SidecarService, SidecarStyle, SystemClock};
@@ -99,6 +101,10 @@ pub struct Options {
     pub marks: MarkPrefs,
     /// Shown in the toast area at start (e.g. problems in the config file).
     pub notice: Option<String>,
+    /// The "Open in" list (FILE-3); `Ctrl+Shift+E` uses the first.
+    pub external_apps: Vec<ExternalApp>,
+    /// Starts external apps (a recorder in tests).
+    pub launcher: Arc<dyn Launcher>,
 }
 
 impl Default for Options {
@@ -111,6 +117,8 @@ impl Default for Options {
             sidecar_style: SidecarStyle::default(),
             marks: MarkPrefs::default(),
             notice: None,
+            external_apps: default_apps(TargetOs::current()),
+            launcher: Arc::new(ProcessLauncher),
         }
     }
 }
@@ -158,6 +166,8 @@ pub struct BlinkApp {
     /// A scan finished; read capture metadata once the first image is on screen, so it never
     /// competes with it (PERF-1).
     meta_wanted: bool,
+    external_apps: Vec<ExternalApp>,
+    launcher: Arc<dyn Launcher>,
 }
 
 impl BlinkApp {
@@ -229,6 +239,7 @@ impl BlinkApp {
         let mut state = State::new(Formats::new(opts.backend.extensions()));
         state.prefs = opts.marks;
         state.toast = opts.notice;
+        let (external_apps, launcher) = (opts.external_apps, opts.launcher);
         let mut app = Self {
             state,
             fs: opts.fs,
@@ -254,6 +265,8 @@ impl BlinkApp {
             loupe_rect: None,
             filter_text: String::new(),
             filter_error: None,
+            external_apps,
+            launcher,
             meta_wanted: false,
         };
         if let Some(f) = folder {
@@ -454,6 +467,29 @@ impl BlinkApp {
         }
     }
 
+    /// Open the current item's primary file in external app `index` (FILE-3). Resolving the
+    /// program reads the file system, so it runs off the UI thread (PERF-9).
+    pub fn open_external(&mut self, index: usize) {
+        let (Some(app), Some(item)) = (self.external_apps.get(index), self.state.current_item())
+        else {
+            return;
+        };
+        let (app, file) = (app.clone(), item.primary.path.clone());
+        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+        let launcher = self.launcher.clone();
+        std::thread::spawn(move || {
+            let error = match blink_runtime::external::command(fs.as_ref(), &app, &file) {
+                None => Some("program not found".to_string()),
+                Some(cmd) => launcher.launch(&cmd).err().map(|e| e.to_string()),
+            };
+            let _ = tx.send(Action::ExternalAppLaunched {
+                app: app.name,
+                error,
+            });
+            ctx.request_repaint();
+        });
+    }
+
     fn scan(&self, folder: PathBuf, recursive: bool) {
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
@@ -585,6 +621,7 @@ impl BlinkApp {
         let events = ctx.input(|i| i.events.clone());
         let mut actions = Vec::new();
         let mut open = false;
+        let mut external = false;
         let pointer = self.pointer_in_loupe(ctx);
         for ev in events {
             let egui::Event::Key {
@@ -606,6 +643,11 @@ impl BlinkApp {
                 // (`Backspace` too: Mac keyboards often lack forward delete.)
                 Key::Delete | Key::Backspace if m.command && m.shift => Some(Action::ApplyRejects),
                 Key::Z if m.command && m.shift => Some(Action::Redo),
+                // Open in the first external app (FILE-3, SPEC §5.2).
+                Key::E if m.command && m.shift && !repeat => {
+                    external = true;
+                    None
+                }
                 Key::Z if m.command => Some(Action::Undo),
                 // Stars, labels (RATE-1); `Shift+9` is purple whatever the layout makes of it.
                 _ if plain && m.shift && digit == Key::Num9 => {
@@ -655,6 +697,9 @@ impl BlinkApp {
         for a in actions {
             self.dispatch(a);
         }
+        if external {
+            self.open_external(0);
+        }
         if open {
             self.open_dialog();
         }
@@ -696,6 +741,27 @@ impl BlinkApp {
                     .clicked()
                 {
                     actions.push(Action::ApplyRejects);
+                }
+                let mut external = None;
+                ui.menu_button("Open in", |ui| {
+                    for (i, a) in self.external_apps.iter().enumerate() {
+                        let b = ui.add_enabled(
+                            self.state.current_item().is_some(),
+                            egui::Button::new(&a.name),
+                        );
+                        let b = if i == 0 {
+                            b.on_hover_text("Ctrl+Shift+E")
+                        } else {
+                            b
+                        };
+                        if b.clicked() {
+                            ui.close();
+                            external = Some(i);
+                        }
+                    }
+                });
+                if let Some(i) = external {
+                    self.open_external(i);
                 }
                 ui.menu_button("Files", |ui| {
                     for (text, copy) in [

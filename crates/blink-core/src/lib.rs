@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod export;
+pub mod external;
 pub mod filter;
 pub mod formats;
 pub mod info;
