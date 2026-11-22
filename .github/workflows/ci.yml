@@ -33,6 +33,10 @@ jobs:
         with:
           nextest: "false"
       - run: cargo xtask guard --base origin/${{ github.base_ref }}
+      # Each shipped crate must build on its own: workspace feature unification can hide a
+      # missing dependency feature (blink-runtime's toml lacked `serde` for `toml::Table`).
+      - name: Each crate builds alone
+        run: for p in blink-core blink-xmp blink-decode blink-runtime blink-ui blink blink-cli; do cargo check --locked -p "$p" || exit 1; done
 
   test:
     name: Test ${{ matrix.name }}

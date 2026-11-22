@@ -37,7 +37,8 @@ RATE-1, RATE-2 and RATE-3 (M3) add the mark keys of SPEC §5.2, the configurable
    defaults and its `--style` flag, so its output depends only on its arguments.
    **Dependency**: `toml` 1 (MIT/Apache-2.0, already used by dev tooling, and needed by KEY-1's
    TOML keymaps anyway; maintained by the toml-rs project, with frequent releases) becomes a runtime dependency of `blink-runtime`, with default features off
-   and `std` + `parse` on. That means no serde and no derive: the file is read as a `toml::Table`.
+   and `std` + `parse` + `serde` on (`toml::Table` needs the `serde` feature; only `serde` core,
+   no derive). The file is read as a `toml::Table`.
 4. **Undo history** (`State::undo` / `State::redo`, in the pure reducer): each mark change is one
    `MarkEdit` (item primary path, the marks before and after, one field changed). There is no
    limit on its length. A new edit clears the redo stack. Each edit keeps its write targets (every member's
