@@ -6,6 +6,7 @@ use crate::tiles::{self, Prepared, Tile};
 use blink_core::external::{ExternalApp, TargetOs, default_apps};
 use blink_core::filter::{Cond, Filter};
 use blink_core::formats::{FileKind, Formats};
+use blink_core::item::Item;
 use blink_core::preview::PreviewSource;
 use blink_core::sort::SortKey;
 use blink_core::state::{
@@ -22,6 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 /// Loupe background: neutral dark grey, no tint (SPEC §5.1).
 pub const LOUPE_BG: Color32 = Color32::from_gray(24);
@@ -88,6 +90,9 @@ struct Uploaded {
     tiles: Vec<(Geom, TextureHandle)>,
     total: usize,
 }
+
+/// Quiet time after a folder change before the rescan (OPEN-3: changes show within 1 s).
+const RESCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Construction options.
 pub struct Options {
@@ -165,7 +170,11 @@ pub struct BlinkApp {
     filter_error: Option<String>,
     /// A scan finished; read capture metadata once the first image is on screen, so it never
     /// competes with it (PERF-1).
-    meta_wanted: bool,
+    meta_wanted: Vec<Item>,
+    /// The folder the sidecar service watches (FILE-8, OPEN-3).
+    watching: Option<(PathBuf, bool)>,
+    /// A folder change was reported; rescan at this time (debounced bursts, OPEN-3).
+    rescan_at: Option<Instant>,
     external_apps: Vec<ExternalApp>,
     launcher: Arc<dyn Launcher>,
 }
@@ -217,6 +226,7 @@ impl BlinkApp {
                             return;
                         }
                     },
+                    SidecarEvent::FolderChanged => Action::FolderChanged,
                     SidecarEvent::External(c) => {
                         if c.conflict() {
                             eprintln!(
@@ -267,7 +277,9 @@ impl BlinkApp {
             filter_error: None,
             external_apps,
             launcher,
-            meta_wanted: false,
+            meta_wanted: Vec::new(),
+            watching: None,
+            rescan_at: None,
         };
         if let Some(f) = folder {
             app.open_path(&f);
@@ -327,6 +339,11 @@ impl BlinkApp {
         self.sidecars.changed(paths);
     }
 
+    /// Report that the folder listing changed, as the watcher would (OPEN-3; tests).
+    pub fn folder_changed(&self) {
+        self.sidecars.folder_changed();
+    }
+
     /// No decode job is queued or running.
     pub fn loader_idle(&self) -> bool {
         self.loader.idle()
@@ -352,6 +369,15 @@ impl BlinkApp {
         let mut queue = VecDeque::from([action]);
         while let Some(a) = queue.pop_front() {
             let scanned = matches!(a, Action::FolderScanned { .. });
+            let known: std::collections::HashSet<PathBuf> = if scanned {
+                self.state
+                    .items
+                    .iter()
+                    .map(|i| i.primary.path.clone())
+                    .collect()
+            } else {
+                Default::default()
+            };
             if matches!(a, Action::OpenFolder(_)) {
                 // Files may have changed on disk: never reuse an old texture for a path.
                 self.textures.clear();
@@ -370,19 +396,34 @@ impl BlinkApp {
                 self.toast_at = self.ctx.input(|i| i.time);
             }
             if scanned {
-                self.load_marks();
-                self.meta_wanted = true;
+                // A rescan (OPEN-3, undo of a move) reads only the items it added.
+                let fresh: Vec<Item> = self
+                    .state
+                    .items
+                    .iter()
+                    .filter(|i| !known.contains(&i.primary.path))
+                    .cloned()
+                    .collect();
+                if !fresh.is_empty() {
+                    self.load_marks(fresh.clone());
+                    self.meta_wanted.extend(fresh);
+                }
             }
-            if self.meta_wanted
+            if !self.meta_wanted.is_empty()
                 && (self.state.loupe.shown.is_some() || self.state.current.is_none())
             {
-                self.meta_wanted = false;
-                self.load_meta();
+                let items = std::mem::take(&mut self.meta_wanted);
+                self.load_meta(items);
             }
             for e in fx {
                 match &e {
                     Effect::ScanFolder { folder, recursive } => {
-                        self.sidecars.watch(folder.clone(), *recursive);
+                        // A rescan keeps the running watch: a new one could miss events.
+                        let target = Some((folder.clone(), *recursive));
+                        if self.watching != target {
+                            self.sidecars.watch(folder.clone(), *recursive);
+                            self.watching = target;
+                        }
                         self.scan(folder.clone(), *recursive)
                     }
                     Effect::ReloadMarks {
@@ -504,9 +545,8 @@ impl BlinkApp {
         });
     }
 
-    fn load_marks(&self) {
+    fn load_marks(&self, items: Vec<Item>) {
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
-        let items = self.state.items.clone();
         std::thread::spawn(move || {
             let m = blink_runtime::marks::load_marks(fs.as_ref(), &items);
             let _ = tx.send(Action::MarksLoaded(m));
@@ -516,10 +556,9 @@ impl BlinkApp {
 
     /// Capture metadata for filters and the capture-time sort (FILT-1/2), in chunks so the
     /// first items sort before the whole folder is read.
-    fn load_meta(&self) {
+    fn load_meta(&self, items: Vec<Item>) {
         const CHUNK: usize = 256;
         let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
-        let items = self.state.items.clone();
         let busy = self.loader.busy_probe();
         std::thread::spawn(move || {
             for chunk in items.chunks(CHUNK) {
@@ -537,7 +576,21 @@ impl BlinkApp {
         let mut incoming: Vec<Action> = self.rx.try_iter().collect();
         incoming.extend(self.loader.poll());
         for a in incoming {
+            if matches!(a, Action::FolderChanged) {
+                // A copy into the folder reports many events: one rescan once they settle.
+                self.rescan_at = Some(Instant::now() + RESCAN_DEBOUNCE);
+                continue;
+            }
             self.dispatch(a);
+        }
+        if let Some(at) = self.rescan_at {
+            let now = Instant::now();
+            if now >= at {
+                self.rescan_at = None;
+                self.dispatch(Action::FolderChanged);
+            } else {
+                self.ctx.request_repaint_after(at - now);
+            }
         }
     }
 

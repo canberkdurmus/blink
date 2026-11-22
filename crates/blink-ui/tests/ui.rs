@@ -698,3 +698,118 @@ fn req_file_3_ctrl_shift_e_opens_the_current_item_in_the_first_external_app() {
     });
     assert_eq!(launcher.0.lock().unwrap().len(), 2);
 }
+
+fn item_names(app: &BlinkApp) -> Vec<String> {
+    app.state()
+        .items
+        .iter()
+        .map(|i| {
+            i.primary
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// Step until `want` holds; OPEN-3 allows 1 s from the change.
+fn within_1s(h: &mut Harness<'static, BlinkApp>, what: &str, want: impl Fn(&BlinkApp) -> bool) {
+    let t = Instant::now();
+    while !want(h.state()) {
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "{what} not shown within 1 s: {:?}",
+            item_names(h.state())
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn req_open_3_added_removed_and_renamed_files_show_within_1_s() {
+    let fs = Arc::new(folder(3));
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    settle(&mut h);
+    h.key_press(egui::Key::ArrowRight);
+    settle(&mut h);
+    fs.add_file("/f/IMG_0009.ARW", raw(90));
+    h.state().folder_changed();
+    within_1s(&mut h, "added file", |a| a.state().items.len() == 4);
+    let cur = |a: &BlinkApp| {
+        a.state().current_item().map(|i| {
+            i.primary
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    assert_eq!(cur(h.state()).as_deref(), Some("IMG_0001.ARW"));
+    // Removing the current item moves on to the next one.
+    fs.remove_externally("/f/IMG_0001.ARW");
+    h.state().folder_changed();
+    within_1s(&mut h, "removed file", |a| a.state().items.len() == 3);
+    assert_eq!(cur(h.state()).as_deref(), Some("IMG_0002.ARW"));
+    let bytes = fs.remove_externally("/f/IMG_0002.ARW").unwrap();
+    fs.add_file("/f/renamed.ARW", bytes);
+    h.state().folder_changed();
+    within_1s(&mut h, "renamed file", |a| {
+        item_names(a) == ["IMG_0000.ARW", "IMG_0009.ARW", "renamed.ARW"]
+    });
+    settle(&mut h);
+}
+
+/// OPEN-3 with the real watcher and real files (full tier: it touches the disk).
+mod full_folder_watch {
+    use super::*;
+
+    #[test]
+    fn req_open_3_the_real_watcher_shows_added_removed_and_renamed_files_within_1_s() {
+        let dir = std::env::temp_dir().join(format!("blink-open3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..2 {
+            std::fs::write(dir.join(format!("IMG_{i:04}.ARW")), raw(i * 50)).unwrap();
+        }
+        let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+            |ui, app: &mut BlinkApp| app.show(ui),
+            BlinkApp::new(
+                &egui::Context::default(),
+                Some(dir.clone()),
+                Options {
+                    workers: 2,
+                    ..Options::default()
+                },
+            ),
+        );
+        settle(&mut h);
+        // Let the watch start before changing anything.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(dir.join("IMG_0002.ARW"), raw(120)).unwrap();
+        within_1s(&mut h, "added file", |a| a.state().items.len() == 3);
+        std::fs::remove_file(dir.join("IMG_0000.ARW")).unwrap();
+        within_1s(&mut h, "removed file", |a| a.state().items.len() == 2);
+        std::fs::rename(dir.join("IMG_0001.ARW"), dir.join("renamed.ARW")).unwrap();
+        within_1s(&mut h, "renamed file", |a| {
+            item_names(a) == ["IMG_0002.ARW", "renamed.ARW"]
+        });
+        settle(&mut h);
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

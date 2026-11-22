@@ -415,6 +415,13 @@ impl MemFs {
         lock(&self.files).insert(path, bytes.into());
     }
 
+    /// Another program deletes `path` (tests of external changes, OPEN-3). Not a call by
+    /// Blink, so it isn't logged.
+    pub fn remove_externally(&self, path: impl AsRef<Path>) -> Option<Vec<u8>> {
+        lock(&self.mtimes).remove(path.as_ref());
+        lock(&self.files).remove(path.as_ref())
+    }
+
     /// Add an (empty) directory and its parents.
     pub fn add_dir(&self, path: impl AsRef<Path>) {
         let mut dirs = lock(&self.dirs);
