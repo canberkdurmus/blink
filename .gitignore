@@ -7,3 +7,7 @@ corpus/synthetic/
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+# egui_kittest snapshot artefacts of a failed comparison
+**/snapshots/*.new.png
+**/snapshots/*.diff.png
+**/snapshots/*.old.png
