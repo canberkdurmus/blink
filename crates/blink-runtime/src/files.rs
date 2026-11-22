@@ -72,10 +72,11 @@ fn sync_dirs(fs: &dyn Fs, dirs: &BTreeSet<PathBuf>, errors: &mut Vec<String>) {
     }
 }
 
-/// Move one item's `files` into `dest`, all under one name suffix that is free for every file
-/// (so a pair and its sidecars keep matching names). On a failure, the files already moved go
-/// back and the error is reported.
-fn move_item(fs: &dyn Fs, files: &[PathBuf], dest: &Path, out: &mut Outcome) {
+/// Move (or, with `copy`, copy) one item's `files` into `dest`, all under one name suffix that
+/// is free for every file (so a pair and its sidecars keep matching names). On a failed move,
+/// the files already moved go back and the error is reported. A failed copy leaves the copies
+/// made so far (they are reported; Blink unlinks no photo, not even its own copy).
+fn move_item(fs: &dyn Fs, files: &[PathBuf], dest: &Path, copy: bool, out: &mut Outcome) {
     let Some(primary) = files.first() else {
         return;
     };
@@ -95,9 +96,24 @@ fn move_item(fs: &dyn Fs, files: &[PathBuf], dest: &Path, out: &mut Outcome) {
     let mut done = Vec::new();
     for f in files {
         let to = target(n, f);
-        match fs.move_file(f, &to) {
+        let r = if copy {
+            fs.copy_file(f, &to)
+        } else {
+            fs.move_file(f, &to)
+        };
+        match r {
             Ok(()) => done.push((f.clone(), to)),
+            Err(e) if copy => {
+                out.errors.push(format!("{}: {e}", f.display()));
+                out.moves.extend(done);
+                return;
+            }
             Err(e) => {
+                let e = if e.kind() == std::io::ErrorKind::CrossesDevices {
+                    "the destination is on another volume; copy instead".to_string()
+                } else {
+                    e.to_string()
+                };
                 out.errors.push(format!("{}: {e}", f.display()));
                 for (from, to) in done.iter().rev() {
                     if let Err(e) = fs.move_file(to, from) {
@@ -145,10 +161,39 @@ pub fn run(fs: &dyn Fs, op: &FileOp) -> Outcome {
                     dirs.insert(folder.clone());
                 }
                 let before = out.moves.len();
-                move_item(fs, &files, &dest, &mut out);
+                move_item(fs, &files, &dest, false, &mut out);
                 if out.moves.len() > before {
                     dirs.insert(folder);
                     dirs.insert(dest);
+                }
+            }
+        }
+        FileOp::Transfer { items, dest, copy } => {
+            if !fs.metadata(dest).is_ok_and(|m| m.is_dir) {
+                out.errors.push(format!("{}: not a folder", dest.display()));
+            } else {
+                for members in items {
+                    let files = item_files(fs, members);
+                    let Some(primary) = files.first() else {
+                        continue;
+                    };
+                    let folder = dir_of(primary);
+                    if folder == *dest {
+                        out.errors.push(format!(
+                            "{}: already in {}",
+                            primary.display(),
+                            dest.display()
+                        ));
+                        continue;
+                    }
+                    let before = out.moves.len();
+                    move_item(fs, &files, dest, *copy, &mut out);
+                    if out.moves.len() > before {
+                        dirs.insert(dest.clone());
+                        if !copy {
+                            dirs.insert(folder);
+                        }
+                    }
                 }
             }
         }
@@ -439,5 +484,103 @@ mod tests {
         w.queue(p("/f/a.ARW"), MarkChange::RevertRating, true, now);
         assert!(w.flush_all().iter().all(|r| r.result.is_ok()));
         assert_eq!(fs.peek("/f/a.xmp"), Some(original.into()));
+    }
+
+    #[test]
+    fn req_file_2_copy_and_move_take_every_member_and_sidecar_and_never_replace() {
+        let fs = folder();
+        fs.add_dir("/out");
+        fs.add_file("/out/b.ARW", b"already there".to_vec());
+        let before = snapshot(&fs);
+        let items = vec![
+            vec![(p("/f/a.ARW"), true), (p("/f/a.JPG"), false)],
+            vec![(p("/f/b.ARW"), true)],
+        ];
+        let copy = run(
+            &fs,
+            &FileOp::Transfer {
+                items: items.clone(),
+                dest: p("/out"),
+                copy: true,
+            },
+        );
+        assert!(copy.errors.is_empty(), "{:?}", copy.errors);
+        assert_eq!(
+            copy.moves,
+            [
+                (p("/f/a.ARW"), p("/out/a.ARW")),
+                (p("/f/a.JPG"), p("/out/a.JPG")),
+                (p("/f/a.JPG.xmp"), p("/out/a.JPG.xmp")),
+                (p("/f/a.xmp"), p("/out/a.xmp")),
+                (p("/f/b.ARW"), p("/out/b-1.ARW")),
+                (p("/f/b.xmp"), p("/out/b-1.xmp")),
+            ]
+        );
+        let after = snapshot(&fs);
+        for (from, to) in &copy.moves {
+            assert_eq!(after.get(to), before.get(from));
+            assert_eq!(after.get(from), before.get(from), "the original stays");
+        }
+        assert_eq!(after.get(&p("/out/b.ARW")), before.get(&p("/out/b.ARW")));
+        assert!(fs.calls().contains(&FsCall::SyncDir(p("/out"))));
+        // Move: the second copy's names are taken, so the move gets the next suffix.
+        let mv = run(
+            &fs,
+            &FileOp::Transfer {
+                items,
+                dest: p("/out"),
+                copy: false,
+            },
+        );
+        assert!(mv.errors.is_empty());
+        assert_eq!(mv.moves[0], (p("/f/a.ARW"), p("/out/a-1.ARW")));
+        assert_eq!(mv.moves[4], (p("/f/b.ARW"), p("/out/b-2.ARW")));
+        assert!(fs.peek("/f/a.ARW").is_none() && fs.peek("/f/b.xmp").is_none());
+        no_unlink(&fs);
+        // Into the item's own folder, or a folder that doesn't exist: refused.
+        let same = run(
+            &fs,
+            &FileOp::Transfer {
+                items: vec![vec![(p("/f/c.ARW"), true)]],
+                dest: p("/f"),
+                copy: true,
+            },
+        );
+        assert!(same.moves.is_empty() && same.errors.len() == 1);
+        let missing = run(
+            &fs,
+            &FileOp::Transfer {
+                items: vec![vec![(p("/f/c.ARW"), true)]],
+                dest: p("/nope"),
+                copy: true,
+            },
+        );
+        assert!(missing.moves.is_empty() && missing.errors.len() == 1);
+    }
+
+    #[test]
+    fn req_file_2_real_fs_copy_is_durable_no_replace_and_export_writes_only_lists() {
+        let dir = std::env::temp_dir().join(format!("blink-file2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let src = dir.join("a.ARW");
+        std::fs::write(&src, b"raw bytes").unwrap();
+        let fs = crate::fs::RealFs;
+        fs.copy_file(&src, &dir.join("out/a.ARW")).unwrap();
+        assert_eq!(std::fs::read(dir.join("out/a.ARW")).unwrap(), b"raw bytes");
+        assert_eq!(std::fs::read(&src).unwrap(), b"raw bytes");
+        let e = fs.copy_file(&src, &dir.join("out/a.ARW")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        // No temp file is left behind.
+        assert_eq!(std::fs::read_dir(dir.join("out")).unwrap().count(), 1);
+        // Exports: .txt/.csv only, replacing an older list atomically.
+        let list = dir.join("list.csv");
+        crate::atomic::write_export(&fs, &list, b"one").unwrap();
+        crate::atomic::write_export(&fs, &list, b"two").unwrap();
+        assert_eq!(std::fs::read(&list).unwrap(), b"two");
+        let e = crate::atomic::write_export(&fs, &src, b"oops").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&src).unwrap(), b"raw bytes");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

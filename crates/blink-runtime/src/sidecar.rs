@@ -577,11 +577,17 @@ impl SidecarService {
                             // recorded before any watcher event for them is handled.
                             report(&mut w, true);
                             let out = crate::files::run(fs.as_ref(), &op);
+                            // Copies leave the originals where they are.
+                            let copied = matches!(
+                                op,
+                                blink_core::state::FileOp::Transfer { copy: true, .. }
+                            );
                             let moved: Vec<(PathBuf, Option<PathBuf>)> = out
                                 .moves
                                 .iter()
                                 .map(|(a, b)| (a.clone(), Some(b.clone())))
                                 .chain(out.trashed.iter().map(|a| (a.clone(), None)))
+                                .filter(|_| !copied)
                                 .collect();
                             w.moved(&moved);
                             done(out);

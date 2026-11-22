@@ -264,14 +264,6 @@ fn cmd_list(
     Ok(())
 }
 
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
 fn cmd_export(
     fs: &dyn Fs,
     backend: &dyn RawBackend,
@@ -285,31 +277,12 @@ fn cmd_export(
         "csv" => true,
         f => return Err(format!("unknown format `{f}` (txt or csv)")),
     };
-    if csv {
-        let _ = writeln!(out, "path,rating,label,pick");
-    }
-    for i in filtered(fs, &s, &o.filter) {
-        let m = s.marks.get(&i.primary.path);
-        for member in i.members() {
-            let p = member.path.to_string_lossy();
-            if csv {
-                let rating = m
-                    .and_then(|m| m.rating)
-                    .map(|r| r.to_string())
-                    .unwrap_or_default();
-                let label = m.and_then(|m| m.label.clone()).unwrap_or_default();
-                let pick = m.and_then(|m| m.rating) == Some(PICK_VALUE);
-                let _ = writeln!(
-                    out,
-                    "{},{rating},{},{pick}",
-                    csv_field(&p),
-                    csv_field(&label)
-                );
-            } else {
-                let _ = writeln!(out, "{p}");
-            }
-        }
-    }
+    out.push_str(&blink_core::export::item_list(
+        filtered(fs, &s, &o.filter),
+        &s.marks,
+        PICK_VALUE,
+        csv,
+    ));
     Ok(())
 }
 

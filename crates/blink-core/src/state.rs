@@ -156,6 +156,8 @@ impl Edit {
 pub enum FileOpKind {
     /// Apply rejects (FILE-1).
     ApplyRejects { to_trash: bool },
+    /// Copy (`copy`) or move the filtered items to another folder (FILE-2).
+    Transfer { copy: bool },
     /// Undo of a [`FilesEdit`].
     Undo,
     /// Redo of a [`FilesEdit`].
@@ -174,6 +176,13 @@ pub enum FileOp {
     },
     /// Make exactly these moves (undo/redo), in order.
     Moves(Vec<(PathBuf, PathBuf)>),
+    /// Copy or move every member and sidecar of each item into `dest` (FILE-2). Members as in
+    /// [`FileOp::Rejects`].
+    Transfer {
+        items: Vec<Vec<(PathBuf, bool)>>,
+        dest: PathBuf,
+        copy: bool,
+    },
 }
 
 /// A dialog waiting for the user's answer (SPEC §5.1).
@@ -612,6 +621,21 @@ impl State {
         }
     }
 
+    /// Each member of `items[i]` with whether it owns the Adobe-style sidecar name (FILE-4).
+    fn members_of(&self, i: usize) -> Vec<(PathBuf, bool)> {
+        sidecar_writes(&self.items, i, &MarkChange::RevertLabel)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::WriteSidecar {
+                    source,
+                    owns_adobe_name,
+                    ..
+                } => Some((source, owns_adobe_name)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Indices of the folder's rejected items (all of them, whatever the filter shows).
     fn rejected_items(&self) -> Vec<usize> {
         (0..self.items.len())
@@ -754,6 +778,21 @@ pub enum Action {
     ApplyRejects,
     /// The open dialog's OK.
     Confirm,
+    /// Copy or move the filtered (visible) items to `dest` (FILE-2).
+    Transfer {
+        dest: PathBuf,
+        copy: bool,
+    },
+    /// Save the filtered items as a `.txt` path list or a `.csv` (FILE-2).
+    ExportList {
+        path: PathBuf,
+        csv: bool,
+    },
+    /// Result of [`Effect::WriteExport`].
+    ExportWritten {
+        path: PathBuf,
+        error: Option<String>,
+    },
     /// The open dialog's Cancel (or Escape).
     CancelDialog,
     /// Result of [`Effect::FileOp`]: the moves made (`(from, to)`, in order), the files moved
@@ -815,6 +854,11 @@ pub enum Effect {
     FileOp {
         op: FileOp,
         kind: FileOpKind,
+    },
+    /// Write an item list (FILE-2) atomically; answer with [`Action::ExportWritten`].
+    WriteExport {
+        path: PathBuf,
+        contents: String,
     },
 }
 
@@ -1227,19 +1271,7 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                 let items: Vec<Vec<(PathBuf, bool)>> = s
                     .rejected_items()
                     .into_iter()
-                    .map(|i| {
-                        sidecar_writes(&s.items, i, &MarkChange::RevertLabel)
-                            .into_iter()
-                            .filter_map(|e| match e {
-                                Effect::WriteSidecar {
-                                    source,
-                                    owns_adobe_name,
-                                    ..
-                                } => Some((source, owns_adobe_name)),
-                                _ => None,
-                            })
-                            .collect()
-                    })
+                    .map(|i| s.members_of(i))
                     .collect();
                 if !items.is_empty() && !s.file_op_running {
                     s.file_op_running = true;
@@ -1252,6 +1284,33 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
             }
         }
         Action::CancelDialog => s.confirm = None,
+        Action::Transfer { dest, copy } => {
+            if s.file_op_running {
+                s.toast = Some("A file operation is still running".into());
+            } else if s.visible.is_empty() {
+                s.toast = Some("No items to copy or move".into());
+            } else {
+                let items = s.visible.iter().map(|&i| s.members_of(i)).collect();
+                s.file_op_running = true;
+                s.file_op = s.folder.clone().map(|d| (d, Vec::new()));
+                fx.push(Effect::FileOp {
+                    op: FileOp::Transfer { items, dest, copy },
+                    kind: FileOpKind::Transfer { copy },
+                });
+            }
+        }
+        Action::ExportList { path, csv } => {
+            let contents =
+                crate::export::item_list(s.visible_items(), &s.marks, s.prefs.pick_value, csv);
+            fx.push(Effect::WriteExport { path, contents });
+        }
+        Action::ExportWritten { path, error } => {
+            let name = path.display();
+            s.toast = Some(match error {
+                None => format!("Saved the item list to {name}"),
+                Some(e) => format!("Could not save {name}: {e}"),
+            });
+        }
         Action::FilesMoved {
             kind,
             moves,
@@ -1303,6 +1362,22 @@ pub fn reduce(state: &State, action: Action) -> (State, Vec<Effect>) {
                     } else {
                         format!("Moved {n_items} rejected items to _rejected/")
                     });
+                }
+                FileOpKind::Transfer { copy: true } => {
+                    let n = s
+                        .items
+                        .iter()
+                        .filter(|i| moves.iter().any(|(f, _)| *f == i.primary.path))
+                        .count();
+                    s.toast = Some(format!("Copied {n} items"));
+                }
+                FileOpKind::Transfer { copy: false } => {
+                    if !moves.is_empty() {
+                        s.undo.push(Edit::Files(edit));
+                        s.redo.clear();
+                    }
+                    s.remove_items(&gone, &mut fx);
+                    s.toast = Some(format!("Moved {n_items} items"));
                 }
                 FileOpKind::Redo => {
                     if !unmade.is_empty() {
@@ -2559,5 +2634,114 @@ mod tests {
         let s = done(&s, FileOpKind::Undo, vec![moves[1].clone()], vec![]);
         assert!(!s.file_op_running);
         assert!(s.undo.is_empty() && s.redo.is_empty());
+    }
+
+    #[test]
+    fn req_file_2_copy_move_and_export_act_on_the_filtered_items() {
+        let s = opened(&["a.ARW", "a.JPG", "b.ARW", "c.ARW"]);
+        let (s, _) = reduce(
+            &s,
+            Action::MarksLoaded(vec![
+                (
+                    "/f/a.ARW".into(),
+                    Marks {
+                        rating: Some(3),
+                        label: Some("Red".into()),
+                    },
+                ),
+                (
+                    "/f/c.ARW".into(),
+                    Marks {
+                        rating: Some(4),
+                        label: None,
+                    },
+                ),
+            ]),
+        );
+        let (s, _) = reduce(&s, Action::AddFilter(Cond::RatingAtLeast(3)));
+        let (e, fx) = reduce(
+            &s,
+            Action::ExportList {
+                path: "/x/l.csv".into(),
+                csv: true,
+            },
+        );
+        assert!(!e.file_op_running);
+        assert_eq!(
+            fx,
+            [Effect::WriteExport {
+                path: "/x/l.csv".into(),
+                contents: "path,rating,label,pick\n/f/a.ARW,3,Red,false\n/f/a.JPG,3,Red,false\n/f/c.ARW,4,,false\n".into(),
+            }]
+        );
+        let (e, _) = reduce(
+            &e,
+            Action::ExportWritten {
+                path: "/x/l.csv".into(),
+                error: None,
+            },
+        );
+        assert_eq!(e.toast.as_deref(), Some("Saved the item list to /x/l.csv"));
+        // Copy: the visible items only; nothing changes in the folder or the history.
+        let (c, fx) = reduce(
+            &s,
+            Action::Transfer {
+                dest: "/out".into(),
+                copy: true,
+            },
+        );
+        assert_eq!(
+            fx,
+            [Effect::FileOp {
+                op: FileOp::Transfer {
+                    items: vec![
+                        vec![("/f/a.ARW".into(), true), ("/f/a.JPG".into(), false)],
+                        vec![("/f/c.ARW".into(), true)],
+                    ],
+                    dest: "/out".into(),
+                    copy: true,
+                },
+                kind: FileOpKind::Transfer { copy: true },
+            }]
+        );
+        let (c, _) = reduce(
+            &c,
+            Action::FilesMoved {
+                kind: FileOpKind::Transfer { copy: true },
+                moves: vec![("/f/c.ARW".into(), "/out/c.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(c.items.len(), 3);
+        assert!(c.undo.is_empty());
+        assert_eq!(c.toast.as_deref(), Some("Copied 1 items"));
+        // Move: the items leave the folder and the move is undoable.
+        let (m, _) = reduce(
+            &s,
+            Action::Transfer {
+                dest: "/out".into(),
+                copy: false,
+            },
+        );
+        let (m, _) = reduce(
+            &m,
+            Action::FilesMoved {
+                kind: FileOpKind::Transfer { copy: false },
+                moves: vec![("/f/c.ARW".into(), "/out/c.ARW".into())],
+                trashed: vec![],
+                errors: vec![],
+            },
+        );
+        assert_eq!(visible_names(&m), ["a.ARW"]);
+        assert!(matches!(m.undo.last(), Some(Edit::Files(_))));
+        let (_, fx) = reduce(&m, Action::Undo);
+        assert!(matches!(
+            &fx[..],
+            [Effect::FileOp {
+                kind: FileOpKind::Undo,
+                ..
+            }]
+        ));
     }
 }

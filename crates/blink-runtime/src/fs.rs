@@ -85,6 +85,11 @@ pub trait Fs: Send + Sync {
     fn trash(&self, path: &Path) -> io::Result<()> {
         Err(read_only(path))
     }
+    /// Copy a file to `to`, durable when it returns, failing with `AlreadyExists` if `to` exists
+    /// (FILE-2). A failed copy leaves nothing at `to`.
+    fn copy_file(&self, from: &Path, _to: &Path) -> io::Result<()> {
+        Err(read_only(from))
+    }
 }
 
 fn refuse_unlink(p: &Path) -> io::Error {
@@ -210,6 +215,32 @@ impl Fs for RealFs {
         std::fs::rename(from, to)
     }
 
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        // Into a temp file next to `to`, made durable, then moved into place: a crash or a full
+        // disk never leaves a partial copy under the real name.
+        let tmp = crate::atomic::temp_path(to);
+        let copied = (|| {
+            let mut src = std::fs::File::open(from)?;
+            let mut dst = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            std::io::copy(&mut src, &mut dst)?;
+            dst.sync_all()
+        })();
+        let placed = copied.and_then(|()| self.move_file(&tmp, to));
+        if placed.is_err() {
+            let _ = self.remove_file(&tmp);
+        }
+        placed
+    }
+
     fn trash(&self, path: &Path) -> io::Result<()> {
         trash_moves_without_copying(path)?;
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -294,6 +325,7 @@ pub enum FsCall {
     RemoveFile(PathBuf),
     CreateDir(PathBuf),
     MoveFile(PathBuf, PathBuf),
+    CopyFile(PathBuf, PathBuf),
     Trash(PathBuf),
 }
 
@@ -313,6 +345,7 @@ impl FsCall {
                 vec![p]
             }
             Self::Rename(a, b) | Self::MoveFile(a, b) => vec![a, b],
+            Self::CopyFile(_, b) => vec![b],
             _ => vec![],
         }
     }
@@ -712,6 +745,25 @@ impl Fs for MemFs {
         if let Some(t) = m.remove(from) {
             m.insert(to.to_path_buf(), t);
         }
+        Ok(())
+    }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.write_step(FsCall::CopyFile(from.to_path_buf(), to.to_path_buf()))?;
+        if lock(&self.files).contains_key(to) || lock(&self.dirs).contains_key(to) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                to.display().to_string(),
+            ));
+        }
+        if !self.dir_exists(to) {
+            return Err(not_found(to));
+        }
+        let bytes = lock(&self.files)
+            .get(from)
+            .cloned()
+            .ok_or_else(|| not_found(from))?;
+        lock(&self.files).insert(to.to_path_buf(), bytes);
         Ok(())
     }
 

@@ -412,6 +412,21 @@ impl BlinkApp {
                             ctx.request_repaint();
                         });
                     }
+                    Effect::WriteExport { path, contents } => {
+                        let (fs, tx, ctx) = (self.fs.clone(), self.tx.clone(), self.ctx.clone());
+                        let (path, contents) = (path.clone(), contents.clone());
+                        std::thread::spawn(move || {
+                            let error = blink_runtime::atomic::write_export(
+                                fs.as_ref(),
+                                &path,
+                                contents.as_bytes(),
+                            )
+                            .err()
+                            .map(|e| e.to_string());
+                            let _ = tx.send(Action::ExportWritten { path, error });
+                            ctx.request_repaint();
+                        });
+                    }
                     Effect::Show { .. } | Effect::LoadFull { .. } => {
                         queue.extend(self.loader.execute(&e));
                     }
@@ -663,6 +678,34 @@ impl BlinkApp {
                 {
                     actions.push(Action::ApplyRejects);
                 }
+                ui.menu_button("Files", |ui| {
+                    for (text, copy) in [
+                        ("Copy filtered items to…", true),
+                        ("Move filtered items to…", false),
+                    ] {
+                        if ui.button(text).clicked() {
+                            ui.close();
+                            if let Some(dest) = rfd::FileDialog::new().pick_folder() {
+                                actions.push(Action::Transfer { dest, copy });
+                            }
+                        }
+                    }
+                    for (text, ext, csv) in [
+                        ("Export list as .txt…", "txt", false),
+                        ("Export list as .csv…", "csv", true),
+                    ] {
+                        if ui.button(text).clicked() {
+                            ui.close();
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter(ext, &[ext])
+                                .set_file_name(format!("blink-items.{ext}"))
+                                .save_file()
+                            {
+                                actions.push(Action::ExportList { path, csv });
+                            }
+                        }
+                    }
+                });
                 let folder = self
                     .state
                     .folder

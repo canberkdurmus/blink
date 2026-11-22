@@ -572,3 +572,52 @@ fn req_file_1_ctrl_shift_delete_confirms_moves_rejects_to_rejected_and_ctrl_z_br
     assert_eq!(now, before);
     assert!(!fs.calls().iter().any(|c| matches!(c, FsCall::RemoveFile(p) if !p.to_string_lossy().ends_with(".xmp") && !p.to_string_lossy().ends_with(".tmp"))));
 }
+
+#[test]
+fn req_file_2_copy_move_and_export_of_the_filtered_items_through_the_app() {
+    use blink_core::filter::Cond;
+    use blink_core::state::Action;
+    let fs = Arc::new(folder(3));
+    fs.add_dir("/out");
+    fs.add_file(
+        "/f/IMG_0001.xmp",
+        blink_testkit::sidecars::lightroom(4, None),
+    );
+    let mut h = Harness::builder().with_size([800.0, 500.0]).build_ui_state(
+        |ui, app: &mut BlinkApp| app.show(ui),
+        BlinkApp::new(
+            &egui::Context::default(),
+            Some("/f".into()),
+            Options {
+                fs: fs.clone(),
+                workers: 2,
+                ..Options::default()
+            },
+        ),
+    );
+    step_until(&mut h, "marks loaded", |a| !a.state().marks.is_empty());
+    settle(&mut h);
+    h.state_mut()
+        .dispatch(Action::AddFilter(Cond::RatingAtLeast(4)));
+    h.state_mut().dispatch(Action::ExportList {
+        path: "/out/list.txt".into(),
+        csv: false,
+    });
+    step_until(&mut h, "exported", |_| fs.peek("/out/list.txt").is_some());
+    assert_eq!(fs.peek("/out/list.txt").unwrap(), b"/f/IMG_0001.ARW\n");
+    h.state_mut().dispatch(Action::Transfer {
+        dest: "/out".into(),
+        copy: true,
+    });
+    step_until(&mut h, "copied", |a| !a.state().file_op_running);
+    assert_eq!(fs.peek("/out/IMG_0001.ARW"), fs.peek("/f/IMG_0001.ARW"));
+    assert_eq!(fs.peek("/out/IMG_0001.xmp"), fs.peek("/f/IMG_0001.xmp"));
+    assert!(fs.peek("/out/IMG_0000.ARW").is_none(), "filtered out");
+    h.state_mut().dispatch(Action::Transfer {
+        dest: "/out".into(),
+        copy: false,
+    });
+    step_until(&mut h, "moved", |a| a.state().items.len() == 2);
+    assert!(fs.peek("/f/IMG_0001.ARW").is_none());
+    assert!(fs.peek("/out/IMG_0001-1.ARW").is_some());
+}
